@@ -8,6 +8,7 @@ public enum SidebarDestination: Hashable, Identifiable {
     case allJunk
     case safeSweep
     case category(CleanupCategory)
+    case worktrees
     case dormantClones
     case toolCleaners
     case shieldedProjects
@@ -20,6 +21,7 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .allJunk: return "all_junk"
         case .safeSweep: return "safe_sweep"
         case .category(let cat): return "cat_\(cat.rawValue)"
+        case .worktrees: return "worktrees"
         case .dormantClones: return "dormant_clones"
         case .toolCleaners: return "tool_cleaners"
         case .shieldedProjects: return "shielded_projects"
@@ -34,6 +36,7 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .allJunk: return "All Items"
         case .safeSweep: return "Safe Sweep"
         case .category(let cat): return cat.title
+        case .worktrees: return "Worktrees"
         case .dormantClones: return "Dormant Clones"
         case .toolCleaners: return "Tool Tasks"
         case .shieldedProjects: return "Protected"
@@ -48,6 +51,7 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .allJunk: return "All discovered developer artifacts and caches"
         case .safeSweep: return "Rebuildable artifacts in clean, inactive projects (30d+)"
         case .category(let cat): return cat.subtitle
+        case .worktrees: return "Linked git worktrees inspected for merged status, uncommitted changes, and locks"
         case .dormantClones: return "Read-only git clones (0 local commits) and repos untouched for 120+ days"
         case .toolCleaners: return "Native CLI subcommands: git gc packfiles, simctl unavailable devices, brew cleanup"
         case .shieldedProjects: return "Protected due to recent activity, dirty git tree, or active lock"
@@ -62,6 +66,7 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .allJunk: return "square.grid.2x2"
         case .safeSweep: return "sparkles"
         case .category(let cat): return cat.systemImage
+        case .worktrees: return "arrow.triangle.branch"
         case .dormantClones: return "moon.zzz"
         case .toolCleaners: return "terminal"
         case .shieldedProjects: return "shield"
@@ -265,6 +270,22 @@ public final class AppViewModel {
         ByteFormatting.string(from: safeSweepTotalBytes)
     }
 
+    public var worktreeItems: [CleanupItem] {
+        items.filter { $0.worktree != nil }
+    }
+
+    public var worktreeTotalBytes: Int64 {
+        worktreeItems.reduce(0) { $0 + $1.allocatedSizeBytes }
+    }
+
+    public var safeMergedWorktreeItems: [CleanupItem] {
+        worktreeItems.filter { item in
+            guard let wt = item.worktree else { return false }
+            if wt.isPrunable { return true }
+            return wt.isMergedIntoMain && !wt.isLocked && !item.protection.hasUncommittedChanges && !item.protection.hasActiveProcess
+        }
+    }
+
     public var dormantCloneItems: [CleanupItem] {
         items.filter { $0.protection.isDormantOrOrphaned && $0.category == .projectArtifacts }
     }
@@ -359,6 +380,8 @@ public final class AppViewModel {
             result = result.filter { $0.isEligibleForSafeSweep(minimumStaleDays: safeSweepMinimumStaleDays) }
         case .category(let category):
             result = result.filter { $0.category == category }
+        case .worktrees:
+            result = result.filter { $0.worktree != nil }
         case .dormantClones:
             result = result.filter { $0.protection.isDormantOrOrphaned && $0.category == .projectArtifacts }
         case .toolCleaners:

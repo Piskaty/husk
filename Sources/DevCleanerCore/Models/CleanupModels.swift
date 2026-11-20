@@ -261,6 +261,35 @@ public struct ProjectProtectionState: Codable, Sendable, Equatable {
     }
 }
 
+public struct WorktreeMetadata: Codable, Sendable, Equatable {
+    public let mainRepoPath: String
+    public let branchName: String?
+    public let isMergedIntoMain: Bool
+    public let isLocked: Bool
+    public let isPrunable: Bool
+
+    public init(
+        mainRepoPath: String,
+        branchName: String? = nil,
+        isMergedIntoMain: Bool = false,
+        isLocked: Bool = false,
+        isPrunable: Bool = false
+    ) {
+        self.mainRepoPath = mainRepoPath
+        self.branchName = branchName
+        self.isMergedIntoMain = isMergedIntoMain
+        self.isLocked = isLocked
+        self.isPrunable = isPrunable
+    }
+
+    public var statusBadgeText: String {
+        if isPrunable { return "Prunable" }
+        if isLocked { return "Locked" }
+        if isMergedIntoMain { return "Merged" }
+        return "Unmerged"
+    }
+}
+
 public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
     public let id: String
     public let ruleId: String
@@ -278,6 +307,7 @@ public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
     public let regenerateHint: String
     public let rebuildCommand: String?
     public let actionKind: CleanupActionKind
+    public let worktree: WorktreeMetadata?
 
     public init(
         id: String? = nil,
@@ -295,7 +325,8 @@ public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
         protection: ProjectProtectionState,
         regenerateHint: String,
         rebuildCommand: String? = nil,
-        actionKind: CleanupActionKind = .filesystem
+        actionKind: CleanupActionKind = .filesystem,
+        worktree: WorktreeMetadata? = nil
     ) {
         self.id = id ?? path.standardizedFileURL.path
         self.ruleId = ruleId
@@ -313,6 +344,7 @@ public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
         self.regenerateHint = regenerateHint
         self.rebuildCommand = rebuildCommand
         self.actionKind = actionKind
+        self.worktree = worktree
     }
 
     public var effectiveSafetyTier: SafetyTier {

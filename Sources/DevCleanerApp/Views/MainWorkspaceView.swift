@@ -88,6 +88,13 @@ public struct MainWorkspaceView: View {
                         sidebarSectionHeader("Smart Views")
 
                         sidebarItem(
+                            destination: .worktrees,
+                            trailingText: viewModel.worktreeTotalBytes > 0
+                                ? ByteFormatting.string(from: viewModel.worktreeTotalBytes)
+                                : (viewModel.worktreeItems.isEmpty ? nil : "\(viewModel.worktreeItems.count)")
+                        )
+
+                        sidebarItem(
                             destination: .dormantClones,
                             trailingText: viewModel.dormantCloneTotalBytes > 0
                                 ? ByteFormatting.string(from: viewModel.dormantCloneTotalBytes)

@@ -30,7 +30,7 @@ public struct CleanupExecutor: Sendable {
         var totalReclaimed: Int64 = 0
 
         for item in items {
-            switch safetyInspector.validateDeletionTarget(item.path, allowedWorkspaceRoots: allowedWorkspaceRoots) {
+            switch safetyInspector.validateDeletionItem(item, allowedWorkspaceRoots: allowedWorkspaceRoots) {
             case .failure(let safetyError):
                 records.append(
                     CleanedItemRecord(

@@ -263,6 +263,52 @@ public struct APFSBlockScanner: Sendable {
             }
         }
 
+        // 3. Discover Linked Git Worktrees across all discovered main repositories
+        var worktreeItems: [CleanupItem] = []
+        await withTaskGroup(of: [CleanupItem].self) { group in
+            for gitCandidate in gitRepoCandidates {
+                group.addTask {
+                    guard !Task.isCancelled else { return [] }
+                    return GitWorktreeInspector.discoverLinkedWorktrees(
+                        forMainRepo: gitCandidate.repoDir,
+                        workspaceRoot: gitCandidate.workspaceRoot,
+                        homeDirectory: configuration.homeDirectory,
+                        activeShieldWindowDays: configuration.activeShieldWindowDays,
+                        now: configuration.now
+                    )
+                }
+            }
+            for await batch in group {
+                for item in batch {
+                    worktreeItems.append(item)
+                    totalBytes += item.allocatedSizeBytes
+                    onProgress?(
+                        ScanProgressUpdate(
+                            currentPath: item.displayPath,
+                            discoveredCount: results.count + worktreeItems.count,
+                            totalAllocatedBytes: totalBytes
+                        )
+                    )
+                }
+            }
+        }
+
+        // Avoid double-counting project artifacts that reside inside a discovered linked worktree
+        let worktreePaths = worktreeItems
+            .filter { $0.worktree?.isPrunable != true }
+            .map { $0.path.standardizedFileURL.path }
+
+        if !worktreePaths.isEmpty {
+            results.removeAll { item in
+                guard item.worktree == nil, item.category == .projectArtifacts else { return false }
+                let itemPath = item.path.standardizedFileURL.path
+                return worktreePaths.contains { wtPath in
+                    itemPath == wtPath || itemPath.hasPrefix(wtPath + "/")
+                }
+            }
+        }
+        results.append(contentsOf: worktreeItems)
+
         // Deduplicate by item.id and sort descending by physical allocated bytes
         var seen = Set<String>()
         var unique: [CleanupItem] = []

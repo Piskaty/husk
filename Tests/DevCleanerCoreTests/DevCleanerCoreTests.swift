@@ -411,6 +411,101 @@ struct DevCleanerCoreTests {
         }
     }
 
+    // MARK: - 8. Git Worktree Discovery, Safety Inspection & Cleanup Tests
+
+    @Test("Discovers linked git worktrees, distinguishes merged/clean vs unmerged/dirty, and removes cleanly via git worktree remove")
+    func discoversAndSafelyRemovesGitWorktrees() async throws {
+        let box = try TestSandbox()
+        defer { box.cleanup() }
+
+        let mainRepo = box.workspaceRoot.appendingPathComponent("core-app", isDirectory: true)
+        try FileManager.default.createDirectory(at: mainRepo, withIntermediateDirectories: true)
+
+        func runGit(_ args: [String], in dir: URL) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = ["-C", dir.path] + args
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            try process.run()
+            process.waitUntilExit()
+            #expect(process.terminationStatus == 0)
+        }
+
+        try runGit(["init", "-b", "main"], in: mainRepo)
+        try runGit(["config", "user.name", "Husk Test"], in: mainRepo)
+        try runGit(["config", "user.email", "test@husk.app"], in: mainRepo)
+        try writeDummyFile(at: mainRepo.appendingPathComponent("README.md"), content: "# Core App\n")
+        try runGit(["add", "."], in: mainRepo)
+        try runGit(["commit", "-m", "initial commit"], in: mainRepo)
+
+        // Worktree 1: Merged & Clean (points to same commit as main)
+        let mergedWT = box.sandboxRoot.appendingPathComponent("wt-merged", isDirectory: true)
+        try runGit(["worktree", "add", "-b", "feat/merged-ui", mergedWT.path, "main"], in: mainRepo)
+
+        // Backdate files inside mergedWT so it's inactive (> 7 days)
+        let now = Date()
+        let oldDate = now.addingTimeInterval(-20 * 86_400)
+        try setModificationDate(oldDate, for: mergedWT.appendingPathComponent("README.md"))
+        try setModificationDate(oldDate, for: mergedWT.appendingPathComponent(".git"))
+        try setModificationDate(oldDate, for: mergedWT)
+
+        // Worktree 2: Unmerged commit + Dirty untracked file
+        let dirtyWT = box.sandboxRoot.appendingPathComponent("wt-dirty", isDirectory: true)
+        try runGit(["worktree", "add", "-b", "feat/wip-branch", dirtyWT.path, "main"], in: mainRepo)
+        try writeDummyFile(at: dirtyWT.appendingPathComponent("feature.swift"), content: "let x = 1\n")
+        try runGit(["add", "feature.swift"], in: dirtyWT)
+        try runGit(["commit", "-m", "wip unmerged commit"], in: dirtyWT)
+        try writeDummyFile(at: dirtyWT.appendingPathComponent("untracked-notes.txt"), content: "do not lose me\n")
+
+        let scanner = APFSBlockScanner()
+        let config = ScanConfiguration(
+            workspaceRoots: [box.workspaceRoot],
+            homeDirectory: box.fakeHomeRoot,
+            includeGlobalCaches: false,
+            activeShieldWindowDays: 7,
+            runGitStatusProcess: true,
+            now: now
+        )
+
+        let items = await scanner.scan(configuration: config)
+        let worktrees = items.filter { $0.worktree != nil }
+        #expect(worktrees.count == 2)
+
+        let mergedItem = try #require(worktrees.first { $0.path.lastPathComponent == "wt-merged" })
+        #expect(mergedItem.worktree?.isMergedIntoMain == true)
+        #expect(mergedItem.protection.hasUncommittedChanges == false)
+        #expect(mergedItem.protection.isShielded == false)
+        #expect(mergedItem.effectiveSafetyTier == .safeRebuildable)
+        #expect(mergedItem.worktree?.statusBadgeText == "Merged")
+
+        let dirtyItem = try #require(worktrees.first { $0.path.lastPathComponent == "wt-dirty" })
+        #expect(dirtyItem.worktree?.isMergedIntoMain == false)
+        #expect(dirtyItem.protection.hasUncommittedChanges == true)
+        #expect(dirtyItem.protection.isShielded == true)
+        #expect(dirtyItem.effectiveSafetyTier == .protectedManual)
+        #expect(dirtyItem.worktree?.statusBadgeText == "Unmerged")
+
+        // Execute cleanup on the merged & clean worktree via CleanupExecutor (`git worktree remove`)
+        let inspector = SafetyInspector(homeDirectory: box.fakeHomeRoot)
+        let auditStore = AuditLogStore(storageDirectory: box.auditRoot)
+        let executor = CleanupExecutor(
+            safetyInspector: inspector,
+            auditStore: auditStore,
+            customTrashDirectory: box.trashRoot
+        )
+
+        let session = try executor.execute(
+            items: [mergedItem],
+            mode: .moveToTrash,
+            dryRun: false,
+            allowedWorkspaceRoots: [box.workspaceRoot]
+        )
+        #expect(session.items.first?.errorDescription == nil)
+        #expect(FileManager.default.fileExists(atPath: mergedWT.path) == false)
+        #expect(FileManager.default.fileExists(atPath: dirtyWT.path) == true)
+    }
+
     // MARK: - Helpers
 
     private func writeDummyFile(

@@ -151,6 +151,20 @@ public struct CommandPaletteView: View {
                 perform: { viewModel.applySafeSweepSelection(andPreview: true) }
             ),
             PaletteAction(
+                id: "cmd.select_merged_worktrees",
+                title: "Select Merged & Clean Git Worktrees",
+                subtitle: "Linked worktrees already merged into main with zero uncommitted changes",
+                systemImage: "arrow.triangle.branch",
+                badgeText: ByteFormatting.string(
+                    from: viewModel.safeMergedWorktreeItems.reduce(0) { $0 + $1.allocatedSizeBytes }
+                ),
+                perform: {
+                    viewModel.sidebarDestination = .worktrees
+                    let ids = Set(viewModel.safeMergedWorktreeItems.map(\.id))
+                    viewModel.selectedIDs = ids
+                }
+            ),
+            PaletteAction(
                 id: "cmd.select_dormant_clones",
                 title: "Select Dormant & Read-Only Clones",
                 subtitle: "Untouched repos (120d+) and read-only clones (0 local commits)",

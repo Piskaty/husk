@@ -52,16 +52,24 @@ public struct ArtifactRowCard: View {
                             .lineLimit(1)
                     }
 
+                    if let wt = item.worktree {
+                        SubtleTag(
+                            text: wt.statusBadgeText,
+                            systemImage: wt.isPrunable ? "trash" : (wt.isLocked ? "lock.fill" : "arrow.triangle.branch")
+                        )
+                        .help(item.regenerateHint)
+                    }
+
                     if item.protection.isShielded {
                         SubtleTag(text: "Active", systemImage: "shield.fill")
                             .help(item.protection.shieldSummary ?? "Active repository")
                     } else if let dormantText = item.protection.dormantBadgeText {
                         SubtleTag(text: dormantText, systemImage: "moon.zzz")
                             .help("Untouched for \(item.stalenessDays) days\(item.protection.isReadOnlyClone ? " · 0 local commits since clone" : "")")
-                    } else if item.actionKind.isToolCommand {
+                    } else if item.worktree == nil && item.actionKind.isToolCommand {
                         SubtleTag(text: "CLI", systemImage: "terminal")
                             .help(item.regenerateHint)
-                    } else if item.effectiveSafetyTier == .protectedManual {
+                    } else if item.worktree == nil && item.effectiveSafetyTier == .protectedManual {
                         SubtleTag(text: "Manual")
                             .help(item.regenerateHint)
                     }

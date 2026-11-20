@@ -272,6 +272,34 @@ public struct SafetyInspector: Sendable {
         return .success(())
     }
 
+    /// Validates a `CleanupItem`, including linked git worktrees whose main repository resides in `allowedWorkspaceRoots`.
+    public func validateDeletionItem(_ item: CleanupItem, allowedWorkspaceRoots: [URL]) -> Result<Void, SafetyValidationError> {
+        if let worktree = item.worktree {
+            let target = item.path.standardizedFileURL
+            if Self.isSymbolicLink(at: target) {
+                return .failure(.symbolicLinkRejected(target.path))
+            }
+            if isForbiddenPath(target) {
+                return .failure(.forbiddenSystemOrPersonalPath(target.path))
+            }
+            let mainURL = URL(fileURLWithPath: worktree.mainRepoPath).standardizedFileURL
+            if target.path == mainURL.path {
+                return .failure(.cannotDeleteScanRootItself(target.path))
+            }
+            let mainInWorkspace = allowedWorkspaceRoots.contains { root in
+                let rootPrefix = root.standardizedFileURL.path.hasSuffix("/")
+                    ? root.standardizedFileURL.path
+                    : root.standardizedFileURL.path + "/"
+                return mainURL.path.hasPrefix(rootPrefix) || mainURL.path == root.standardizedFileURL.path
+            }
+            guard mainInWorkspace else {
+                return .failure(.outsideAllowedBoundaries(target.path))
+            }
+            return .success(())
+        }
+        return validateDeletionTarget(item.path, allowedWorkspaceRoots: allowedWorkspaceRoots)
+    }
+
     // MARK: - Layer 2: Parent-Manifest Verification
 
     public static func matchingProjectRule(forFolderNamed folderName: String, inParent parentDirectory: URL) -> ProjectArtifactRule? {
