@@ -416,7 +416,10 @@ public struct SettingsView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
     }
 
     @ViewBuilder

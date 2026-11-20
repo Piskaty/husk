@@ -49,7 +49,10 @@ public struct DryRunPreviewSheet: View {
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(0.04))
+                )
             }
 
             ScrollView {
@@ -93,7 +96,14 @@ public struct DryRunPreviewSheet: View {
                 }
             }
             .frame(minHeight: 200, maxHeight: 290)
-            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+            )
 
             HStack(spacing: 10) {
                 Menu {

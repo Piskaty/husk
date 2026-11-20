@@ -315,7 +315,10 @@ public struct MainWorkspaceView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.04))
+            )
 
             // Ecosystem dropdown
             Menu {

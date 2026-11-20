@@ -142,6 +142,9 @@ public struct AuditHistoryView: View {
             }
         }
         .padding(12)
-        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
     }
 }

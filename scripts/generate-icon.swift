@@ -153,3 +153,9 @@ icnsData.append(bodyData)
 let outURL = URL(fileURLWithPath: outputIcnsPath)
 try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 try icnsData.write(to: outURL, options: .atomic)
+
+if args.count > 2, let png256 = renderIcon(pixelSize: 256) {
+    let pngURL = URL(fileURLWithPath: args[2])
+    try FileManager.default.createDirectory(at: pngURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try png256.write(to: pngURL, options: .atomic)
+}
