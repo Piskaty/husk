@@ -97,8 +97,8 @@ public enum UpdateCheckStatus: Sendable, Equatable {
 }
 
 public struct UpdateService: Sendable {
-    public static let currentAppVersion = "1.0.0"
-    public static let currentBuildNumber = "1"
+    public static let currentAppVersion = "1.0.1"
+    public static let currentBuildNumber = "2"
     public static let defaultGitHubRepo = "Piskaty/husk"
 
     public init() {}

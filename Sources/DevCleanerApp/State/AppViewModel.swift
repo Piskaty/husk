@@ -542,6 +542,18 @@ public final class AppViewModel {
         NSWorkspace.shared.open(release.downloadURL)
     }
 
+    public func copyOneLineUpdateCommand() {
+        let cmd = "curl -fsSL https://raw.githubusercontent.com/Piskaty/husk/main/scripts/install.sh | zsh"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(cmd, forType: .string)
+        statusBanner = StatusBannerState(
+            title: "Copied Update Command",
+            subtitle: cmd,
+            isSuccess: true,
+            undoableSession: nil
+        )
+    }
+
     // MARK: - Selection & Execution
 
     public func toggleSelection(for item: CleanupItem) {
