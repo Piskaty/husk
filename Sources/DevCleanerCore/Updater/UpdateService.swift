@@ -126,8 +126,8 @@ public enum UpdateInstallPhase: Sendable, Equatable {
 }
 
 public struct UpdateService: Sendable {
-    public static let currentAppVersion = "1.0.2"
-    public static let currentBuildNumber = "3"
+    public static let currentAppVersion = "1.0.3"
+    public static let currentBuildNumber = "4"
     public static let defaultGitHubRepo = "Piskaty/husk"
 
     public init() {}

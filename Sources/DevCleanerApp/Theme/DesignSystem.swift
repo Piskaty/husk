@@ -37,13 +37,13 @@ public enum DevCleanerTheme {
     public static func categoryColor(_ category: CleanupCategory) -> Color {
         switch category {
         case .projectArtifacts:
-            return Color.primary.opacity(0.78)
+            return Color(red: 0.23, green: 0.55, blue: 0.96) // Cobalt Blue
         case .packageCaches:
-            return Color.primary.opacity(0.50)
+            return Color(red: 0.62, green: 0.39, blue: 0.95) // Violet
         case .xcodeClutter:
-            return Color.primary.opacity(0.32)
+            return Color(red: 0.12, green: 0.74, blue: 0.80) // Cyan Teal
         case .containersAndAI:
-            return Color.primary.opacity(0.18)
+            return Color(red: 0.94, green: 0.51, blue: 0.22) // Warm Coral Orange
         }
     }
 

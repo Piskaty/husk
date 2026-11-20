@@ -7,8 +7,8 @@ cd "$PROJECT_ROOT"
 
 CONFIG="release"
 RUN_AFTER_BUILD=false
-VERSION="${HUSK_VERSION:-1.0.2}"
-BUILD_NUMBER="${HUSK_BUILD_NUMBER:-3}"
+VERSION="${HUSK_VERSION:-1.0.3}"
+BUILD_NUMBER="${HUSK_BUILD_NUMBER:-4}"
 
 for arg in "$@"; do
   case "$arg" in
