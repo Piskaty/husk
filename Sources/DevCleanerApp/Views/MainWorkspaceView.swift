@@ -410,6 +410,24 @@ public struct MainWorkspaceView: View {
 
             Spacer()
 
+            if let release = banner.availableUpdate {
+                if viewModel.updateInstallPhase.isInProgress {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(viewModel.updateInstallPhase.label)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Button("Update & Relaunch") {
+                        viewModel.installUpdateAndRelaunch(release)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+            }
+
             if let undoSession = banner.undoableSession {
                 if undoSession.rebuildShellScript != nil {
                     Button("Copy Rebuild Script") {

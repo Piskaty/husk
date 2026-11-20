@@ -87,6 +87,21 @@ public struct StatusBannerState: Identifiable, Equatable {
     public let subtitle: String
     public let isSuccess: Bool
     public let undoableSession: CleanupSessionRecord?
+    public let availableUpdate: AppReleaseInfo?
+
+    public init(
+        title: String,
+        subtitle: String,
+        isSuccess: Bool,
+        undoableSession: CleanupSessionRecord? = nil,
+        availableUpdate: AppReleaseInfo? = nil
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.isSuccess = isSuccess
+        self.undoableSession = undoableSession
+        self.availableUpdate = availableUpdate
+    }
 }
 
 @Observable
@@ -138,6 +153,7 @@ public final class AppViewModel {
 
     public var launchAtLoginEnabled: Bool = false
     public var updateStatus: UpdateCheckStatus = .idle
+    public var updateInstallPhase: UpdateInstallPhase = .idle
     public var diskSpace: DiskSpaceSnapshot = DiskSpaceSnapshot.current()
 
     public var isScanning: Bool = false
@@ -529,29 +545,54 @@ public final class AppViewModel {
             self.updateStatus = result
             if case .updateAvailable(let release, _) = result {
                 self.statusBanner = StatusBannerState(
-                    title: "Husk \(release.version) is Available",
-                    subtitle: "Open Settings → Updates to view release notes and download.",
+                    title: "Husk \(release.version) is available",
+                    subtitle: release.releaseNotes.isEmpty ? "Ready to install and relaunch in-place." : release.releaseNotes,
                     isSuccess: true,
-                    undoableSession: nil
+                    undoableSession: nil,
+                    availableUpdate: release
                 )
             }
         }
     }
 
-    public func openUpdateDownload(_ release: AppReleaseInfo) {
-        NSWorkspace.shared.open(release.downloadURL)
+    public func installUpdateAndRelaunch(_ release: AppReleaseInfo) {
+        guard !updateInstallPhase.isInProgress else { return }
+        updateInstallPhase = .downloading
+        let service = updateService
+        let targetBundle = UpdateService.resolveCurrentInstallBundleURL()
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let staged = try await service.downloadAndStageUpdate(release: release) { [weak self] phase in
+                    Task { @MainActor [weak self] in
+                        self?.updateInstallPhase = phase
+                    }
+                }
+
+                self.updateInstallPhase = .restarting
+                try service.launchSelfReplaceAndRelaunch(
+                    stagedAppURL: staged.stagedAppURL,
+                    stagingRootURL: staged.stagingRootURL,
+                    targetAppBundleURL: targetBundle
+                )
+
+                // Short yield so the UI shows "Installing & relaunching…" before quitting
+                try? await Task.sleep(for: .milliseconds(250))
+                NSApplication.shared.terminate(nil)
+            } catch {
+                self.updateInstallPhase = .failed(error.localizedDescription)
+                self.statusBanner = StatusBannerState(
+                    title: "Update Failed",
+                    subtitle: error.localizedDescription,
+                    isSuccess: false
+                )
+            }
+        }
     }
 
-    public func copyOneLineUpdateCommand() {
-        let cmd = "curl -fsSL https://raw.githubusercontent.com/Piskaty/husk/main/scripts/install.sh | zsh"
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(cmd, forType: .string)
-        statusBanner = StatusBannerState(
-            title: "Copied Update Command",
-            subtitle: cmd,
-            isSuccess: true,
-            undoableSession: nil
-        )
+    public func openReleasePage(_ release: AppReleaseInfo) {
+        NSWorkspace.shared.open(release.releasePageURL ?? release.downloadURL)
     }
 
     // MARK: - Selection & Execution

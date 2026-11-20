@@ -67,24 +67,34 @@ public struct SettingsView: View {
 
                     HStack(spacing: 8) {
                         if case .updateAvailable(let release, _) = viewModel.updateStatus {
-                            Button {
-                                viewModel.copyOneLineUpdateCommand()
-                            } label: {
-                                Label("Copy CLI Update", systemImage: "terminal")
-                                    .font(.system(size: 12, weight: .medium))
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .help("Copies the 1-line curl update command (no Gatekeeper prompt)")
+                            if viewModel.updateInstallPhase.isInProgress {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text(viewModel.updateInstallPhase.label)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 8)
+                            } else {
+                                Button {
+                                    viewModel.openReleasePage(release)
+                                } label: {
+                                    Text("Release Notes")
+                                        .font(.system(size: 12))
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
 
-                            Button {
-                                viewModel.openUpdateDownload(release)
-                            } label: {
-                                Label("Download \(release.version)", systemImage: "arrow.down.circle")
-                                    .font(.system(size: 12, weight: .medium))
+                                Button {
+                                    viewModel.installUpdateAndRelaunch(release)
+                                } label: {
+                                    Label("Update & Relaunch (\(release.version))", systemImage: "arrow.down.circle.fill")
+                                        .font(.system(size: 12, weight: .medium))
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
                         }
 
                         Button {
@@ -104,7 +114,7 @@ public struct SettingsView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .disabled(viewModel.updateStatus == .checking)
+                        .disabled(viewModel.updateStatus == .checking || viewModel.updateInstallPhase.isInProgress)
                     }
                 }
 

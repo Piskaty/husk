@@ -382,7 +382,7 @@ struct DevCleanerCoreTests {
 
         let ghRelease = try UpdateService.parseReleasePayload(data: githubJSON, fallbackURL: fallbackURL)
         #expect(ghRelease.version == "v1.2.0")
-        #expect(ghRelease.downloadURL.absoluteString.hasSuffix(".dmg"))
+        #expect(ghRelease.downloadURL.absoluteString.hasSuffix(".zip"))
         let ghStatus = UpdateService.compare(release: ghRelease, againstCurrentVersion: "1.0.0")
         if case .updateAvailable(let rel, let current) = ghStatus {
             #expect(rel.version == "v1.2.0")
