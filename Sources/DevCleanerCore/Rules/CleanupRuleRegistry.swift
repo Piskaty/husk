@@ -1,0 +1,501 @@
+import Foundation
+
+public struct ProjectArtifactRule: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let folderName: String
+    public let displayTitle: String
+    public let requiredSiblingManifests: [String]
+    public let ecosystem: Ecosystem
+    public let safetyTier: SafetyTier
+    public let regenerateHint: String
+
+    public init(
+        id: String,
+        folderName: String,
+        displayTitle: String? = nil,
+        requiredSiblingManifests: [String],
+        ecosystem: Ecosystem,
+        safetyTier: SafetyTier = .safeRebuildable,
+        regenerateHint: String
+    ) {
+        self.id = id
+        self.folderName = folderName
+        self.displayTitle = displayTitle ?? folderName
+        self.requiredSiblingManifests = requiredSiblingManifests
+        self.ecosystem = ecosystem
+        self.safetyTier = safetyTier
+        self.regenerateHint = regenerateHint
+    }
+}
+
+public struct FixedCacheRule: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let title: String
+    public let projectName: String
+    public let relativePathFromHome: String
+    public let category: CleanupCategory
+    public let ecosystem: Ecosystem
+    public let safetyTier: SafetyTier
+    public let regenerateHint: String
+    /// When true, each top-level child directory (e.g., individual DerivedData project or HuggingFace model repo) is emitted as an individually selectable CleanupItem.
+    public let expandTopLevelChildren: Bool
+    public let ignoredChildNames: Set<String>
+
+    public init(
+        id: String,
+        title: String,
+        projectName: String,
+        relativePathFromHome: String,
+        category: CleanupCategory,
+        ecosystem: Ecosystem,
+        safetyTier: SafetyTier,
+        regenerateHint: String,
+        expandTopLevelChildren: Bool = false,
+        ignoredChildNames: Set<String> = [".DS_Store", "ModuleCache.noindex"]
+    ) {
+        self.id = id
+        self.title = title
+        self.projectName = projectName
+        self.relativePathFromHome = relativePathFromHome
+        self.category = category
+        self.ecosystem = ecosystem
+        self.safetyTier = safetyTier
+        self.regenerateHint = regenerateHint
+        self.expandTopLevelChildren = expandTopLevelChildren
+        self.ignoredChildNames = ignoredChildNames
+    }
+}
+
+public enum CleanupRuleRegistry {
+    public static let pythonManifests: [String] = [
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "Pipfile",
+        "uv.lock",
+        "poetry.lock"
+    ]
+
+    public static let gradleManifests: [String] = [
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts"
+    ]
+
+    public static let projectArtifactRules: [ProjectArtifactRule] = [
+        // Node / Web
+        ProjectArtifactRule(
+            id: "node.node_modules",
+            folderName: "node_modules",
+            requiredSiblingManifests: ["package.json"],
+            ecosystem: .node,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Reinstall with bun / pnpm / npm / yarn install"
+        ),
+        ProjectArtifactRule(
+            id: "node.next",
+            folderName: ".next",
+            requiredSiblingManifests: ["package.json"],
+            ecosystem: .node,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Rebuilt automatically by next dev / next build"
+        ),
+        ProjectArtifactRule(
+            id: "node.nuxt",
+            folderName: ".nuxt",
+            requiredSiblingManifests: ["package.json"],
+            ecosystem: .node,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Rebuilt automatically by nuxt dev / nuxt build"
+        ),
+        ProjectArtifactRule(
+            id: "node.turbo",
+            folderName: ".turbo",
+            requiredSiblingManifests: ["package.json", "turbo.json"],
+            ecosystem: .node,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Local Turborepo cache; regenerated on next turbo run"
+        ),
+        ProjectArtifactRule(
+            id: "node.parcel_cache",
+            folderName: ".parcel-cache",
+            requiredSiblingManifests: ["package.json"],
+            ecosystem: .node,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Regenerated automatically on next parcel build"
+        ),
+        ProjectArtifactRule(
+            id: "node.vite",
+            folderName: ".vite",
+            requiredSiblingManifests: ["package.json"],
+            ecosystem: .node,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Vite pre-bundling cache; regenerated on next vite start"
+        ),
+        ProjectArtifactRule(
+            id: "node.svelte_kit",
+            folderName: ".svelte-kit",
+            requiredSiblingManifests: ["package.json"],
+            ecosystem: .node,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Regenerated by svelte-kit sync / vite dev"
+        ),
+        ProjectArtifactRule(
+            id: "node.angular",
+            folderName: ".angular",
+            requiredSiblingManifests: ["angular.json", "package.json"],
+            ecosystem: .node,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Angular CLI disk cache; regenerated on ng serve / build"
+        ),
+
+        // Rust
+        ProjectArtifactRule(
+            id: "rust.target",
+            folderName: "target",
+            requiredSiblingManifests: ["Cargo.toml"],
+            ecosystem: .rust,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Rebuilt automatically by cargo build / cargo check"
+        ),
+
+        // Swift
+        ProjectArtifactRule(
+            id: "swift.build",
+            folderName: ".build",
+            requiredSiblingManifests: ["Package.swift"],
+            ecosystem: .swift,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Rebuilt automatically by swift build / swift test"
+        ),
+        ProjectArtifactRule(
+            id: "swift.swiftpm",
+            folderName: ".swiftpm",
+            requiredSiblingManifests: ["Package.swift"],
+            ecosystem: .swift,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Regenerated by Swift Package Manager"
+        ),
+
+        // Python
+        ProjectArtifactRule(
+            id: "python.dot_venv",
+            folderName: ".venv",
+            requiredSiblingManifests: pythonManifests,
+            ecosystem: .python,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Recreate with uv sync or python3 -m venv .venv"
+        ),
+        ProjectArtifactRule(
+            id: "python.venv",
+            folderName: "venv",
+            requiredSiblingManifests: pythonManifests,
+            ecosystem: .python,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Recreate with uv venv or python3 -m venv venv"
+        ),
+        ProjectArtifactRule(
+            id: "python.pycache",
+            folderName: "__pycache__",
+            requiredSiblingManifests: pythonManifests,
+            ecosystem: .python,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Python bytecode cache; regenerated automatically on import"
+        ),
+        ProjectArtifactRule(
+            id: "python.pytest_cache",
+            folderName: ".pytest_cache",
+            requiredSiblingManifests: pythonManifests,
+            ecosystem: .python,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Regenerated on next pytest run"
+        ),
+        ProjectArtifactRule(
+            id: "python.mypy_cache",
+            folderName: ".mypy_cache",
+            requiredSiblingManifests: pythonManifests,
+            ecosystem: .python,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Regenerated on next mypy typecheck"
+        ),
+        ProjectArtifactRule(
+            id: "python.ruff_cache",
+            folderName: ".ruff_cache",
+            requiredSiblingManifests: pythonManifests,
+            ecosystem: .python,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Regenerated on next ruff lint run"
+        ),
+
+        // JVM / Gradle
+        ProjectArtifactRule(
+            id: "jvm.dot_gradle",
+            folderName: ".gradle",
+            requiredSiblingManifests: gradleManifests,
+            ecosystem: .jvm,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Project Gradle cache; regenerated by ./gradlew build"
+        ),
+        ProjectArtifactRule(
+            id: "jvm.build",
+            folderName: "build",
+            requiredSiblingManifests: gradleManifests,
+            ecosystem: .jvm,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Gradle build output; regenerated by ./gradlew assemble"
+        )
+    ]
+
+    public static let rulesByFolderName: [String: [ProjectArtifactRule]] = {
+        Dictionary(grouping: projectArtifactRules, by: \.folderName)
+    }()
+
+    public static let fixedCacheRules: [FixedCacheRule] = [
+        // Category 2: Global Package Manager Caches
+        FixedCacheRule(
+            id: "cache.bun",
+            title: "Bun Global Install Cache",
+            projectName: "Bun Package Manager",
+            relativePathFromHome: ".bun/install/cache",
+            category: .packageCaches,
+            ecosystem: .node,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Global tarball cache (~/.bun/install/cache); re-downloaded on demand"
+        ),
+        FixedCacheRule(
+            id: "cache.pnpm_store",
+            title: "pnpm Content-Addressable Store",
+            projectName: "pnpm Package Manager",
+            relativePathFromHome: "Library/pnpm/store",
+            category: .packageCaches,
+            ecosystem: .node,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "pnpm store; packages re-fetched when running pnpm install"
+        ),
+        FixedCacheRule(
+            id: "cache.pnpm_cache",
+            title: "pnpm Metadata & Dl Cache",
+            projectName: "pnpm Package Manager",
+            relativePathFromHome: "Library/Caches/pnpm",
+            category: .packageCaches,
+            ecosystem: .node,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "pnpm metadata cache; regenerated automatically"
+        ),
+        FixedCacheRule(
+            id: "cache.npm",
+            title: "npm Content Cache (_cacache)",
+            projectName: "npm Package Manager",
+            relativePathFromHome: ".npm/_cacache",
+            category: .packageCaches,
+            ecosystem: .node,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "npm HTTP tarball cache; re-fetched on npm install"
+        ),
+        FixedCacheRule(
+            id: "cache.yarn",
+            title: "Yarn Global Cache",
+            projectName: "Yarn Package Manager",
+            relativePathFromHome: "Library/Caches/Yarn",
+            category: .packageCaches,
+            ecosystem: .node,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Yarn cache; packages re-fetched on yarn install"
+        ),
+        FixedCacheRule(
+            id: "cache.cargo_registry",
+            title: "Cargo Crate Registry Cache",
+            projectName: "Rust / Cargo",
+            relativePathFromHome: ".cargo/registry/cache",
+            category: .packageCaches,
+            ecosystem: .rust,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Downloaded .crate archives; re-downloaded by Cargo when needed"
+        ),
+        FixedCacheRule(
+            id: "cache.cargo_git",
+            title: "Cargo Git Dependency Checkouts",
+            projectName: "Rust / Cargo",
+            relativePathFromHome: ".cargo/git/db",
+            category: .packageCaches,
+            ecosystem: .rust,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Cloned git dependencies; re-cloned by Cargo when building"
+        ),
+        FixedCacheRule(
+            id: "cache.uv_library",
+            title: "uv Wheel & Source Cache",
+            projectName: "Python / uv",
+            relativePathFromHome: "Library/Caches/uv",
+            category: .packageCaches,
+            ecosystem: .python,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "uv package cache; re-fetched on uv sync / uv pip install"
+        ),
+        FixedCacheRule(
+            id: "cache.uv_dotcache",
+            title: "uv Wheel Cache (~/.cache/uv)",
+            projectName: "Python / uv",
+            relativePathFromHome: ".cache/uv",
+            category: .packageCaches,
+            ecosystem: .python,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "uv package cache; re-fetched on uv sync / uv pip install"
+        ),
+        FixedCacheRule(
+            id: "cache.pip",
+            title: "pip HTTP & Wheel Cache",
+            projectName: "Python / pip",
+            relativePathFromHome: "Library/Caches/pip",
+            category: .packageCaches,
+            ecosystem: .python,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "pip download cache; re-fetched on pip install"
+        ),
+        FixedCacheRule(
+            id: "cache.homebrew",
+            title: "Homebrew Bottle & Download Cache",
+            projectName: "Homebrew",
+            relativePathFromHome: "Library/Caches/Homebrew",
+            category: .packageCaches,
+            ecosystem: .homebrew,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Downloaded Homebrew bottles/installers; equivalent to brew cleanup"
+        ),
+        FixedCacheRule(
+            id: "cache.cocoapods",
+            title: "CocoaPods Pod Cache",
+            projectName: "CocoaPods",
+            relativePathFromHome: "Library/Caches/CocoaPods",
+            category: .packageCaches,
+            ecosystem: .swift,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Cached pod specs and tarballs; re-fetched on pod install"
+        ),
+        FixedCacheRule(
+            id: "cache.swiftpm",
+            title: "SwiftPM Global Repository Cache",
+            projectName: "Swift Package Manager",
+            relativePathFromHome: "Library/Caches/org.swift.swiftpm",
+            category: .packageCaches,
+            ecosystem: .swift,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Cloned Swift package repositories; re-fetched on swift package resolve"
+        ),
+
+        // Category 3: Xcode & Apple Developer Clutter
+        FixedCacheRule(
+            id: "xcode.derived_data",
+            title: "Xcode DerivedData",
+            projectName: "Xcode DerivedData",
+            relativePathFromHome: "Library/Developer/Xcode/DerivedData",
+            category: .xcodeClutter,
+            ecosystem: .xcode,
+            safetyTier: .safeRebuildable,
+            regenerateHint: "Intermediate build products and indexes; rebuilt by Xcode on next build",
+            expandTopLevelChildren: true
+        ),
+        FixedCacheRule(
+            id: "xcode.ios_device_support",
+            title: "iOS DeviceSupport Symbols",
+            projectName: "Xcode DeviceSupport",
+            relativePathFromHome: "Library/Developer/Xcode/iOS DeviceSupport",
+            category: .xcodeClutter,
+            ecosystem: .xcode,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Debug symbols for physical iOS versions; re-copied when device is connected",
+            expandTopLevelChildren: true
+        ),
+        FixedCacheRule(
+            id: "xcode.watchos_device_support",
+            title: "watchOS DeviceSupport Symbols",
+            projectName: "Xcode DeviceSupport",
+            relativePathFromHome: "Library/Developer/Xcode/watchOS DeviceSupport",
+            category: .xcodeClutter,
+            ecosystem: .xcode,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Debug symbols for watchOS versions; re-copied when device is paired",
+            expandTopLevelChildren: true
+        ),
+        FixedCacheRule(
+            id: "xcode.coresimulator_caches",
+            title: "CoreSimulator Caches",
+            projectName: "Xcode Simulators",
+            relativePathFromHome: "Library/Developer/CoreSimulator/Caches",
+            category: .xcodeClutter,
+            ecosystem: .xcode,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Simulator dyld and runtime caches; rebuilt automatically when Simulator boots"
+        ),
+        FixedCacheRule(
+            id: "xcode.archives",
+            title: "Xcode Release Archives (.xcarchive)",
+            projectName: "Xcode Archives",
+            relativePathFromHome: "Library/Developer/Xcode/Archives",
+            category: .xcodeClutter,
+            ecosystem: .xcode,
+            safetyTier: .protectedManual,
+            regenerateHint: "Contains historical .xcarchive bundles and dSYMs. Keep archives needed for crash symbolication.",
+            expandTopLevelChildren: true
+        ),
+
+        // Category 4: Containers & AI Model Caches
+        FixedCacheRule(
+            id: "ai.huggingface_hub",
+            title: "HuggingFace Hub Model Cache",
+            projectName: "HuggingFace Hub",
+            relativePathFromHome: ".cache/huggingface/hub",
+            category: .containersAndAI,
+            ecosystem: .aiModels,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Cached weights/datasets; re-downloaded via transformers/huggingface_hub",
+            expandTopLevelChildren: true
+        ),
+        FixedCacheRule(
+            id: "ai.ollama_models",
+            title: "Ollama Local LLM Blobs",
+            projectName: "Ollama",
+            relativePathFromHome: ".ollama/models",
+            category: .containersAndAI,
+            ecosystem: .aiModels,
+            safetyTier: .protectedManual,
+            regenerateHint: "Local LLM model weights; requires 'ollama pull <model>' to re-download"
+        ),
+        FixedCacheRule(
+            id: "ai.pytorch_cache",
+            title: "PyTorch Hub & TorchInductor Cache",
+            projectName: "PyTorch",
+            relativePathFromHome: ".cache/torch",
+            category: .containersAndAI,
+            ecosystem: .aiModels,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Cached Torch checkpoints and kernels; re-downloaded on load"
+        ),
+        FixedCacheRule(
+            id: "containers.docker_buildx",
+            title: "Docker Buildx Local Cache",
+            projectName: "Docker Desktop",
+            relativePathFromHome: ".docker/buildx",
+            category: .containersAndAI,
+            ecosystem: .docker,
+            safetyTier: .cautionRedownload,
+            regenerateHint: "Docker Buildx state and metadata cache"
+        )
+    ]
+
+    /// Returns existing default workspace roots on the user's Mac (`~/Projects`, `~/Developer`, `~/Code`, `~/Workspace`).
+    public static func defaultWorkspaceRoots(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> [URL] {
+        let candidates = ["Projects", "Developer", "Code", "Workspace", "repos", "src"]
+        var roots: [URL] = []
+        let fm = FileManager.default
+        for name in candidates {
+            let url = homeDirectory.appendingPathComponent(name, isDirectory: true).standardizedFileURL
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                roots.append(url)
+            }
+        }
+        return roots
+    }
+}
