@@ -44,7 +44,7 @@ public struct MenuBarPopoverView: View {
                             .font(.system(size: 11))
                     }
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(viewModel.isScanning)
             }
@@ -65,7 +65,10 @@ public struct MenuBarPopoverView: View {
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                )
             }
 
             Divider().opacity(0.45)
@@ -116,7 +119,7 @@ public struct MenuBarPopoverView: View {
                         .font(.system(size: 12, weight: .medium))
                         .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                 }
 
@@ -128,7 +131,7 @@ public struct MenuBarPopoverView: View {
                             .font(.system(size: 12))
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
 
                     Button {
@@ -138,14 +141,14 @@ public struct MenuBarPopoverView: View {
                         Image(systemName: "gearshape")
                             .font(.system(size: 11))
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help("Settings & Updates")
 
                     Button("Quit") {
                         NSApplication.shared.terminate(nil)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
             }

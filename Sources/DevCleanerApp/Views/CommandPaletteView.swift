@@ -104,8 +104,15 @@ public struct CommandPaletteView: View {
                 }
             }
             .frame(width: 520)
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .shadow(color: Color.black.opacity(0.20), radius: 24, y: 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+                    .shadow(color: Color.black.opacity(0.24), radius: 22, y: 10)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
+            )
         }
         .onAppear {
             highlightedIndex = 0

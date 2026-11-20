@@ -33,48 +33,45 @@ public struct StorageHeroCard: View {
 
                 Spacer()
 
-                // Native macOS Liquid Glass Action Cluster
-                GlassEffectContainer(spacing: 8) {
-                    HStack(spacing: 8) {
-                        if viewModel.safeSweepTotalBytes > 0 {
-                            Button {
-                                viewModel.applySafeSweepSelection(andPreview: true)
-                            } label: {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "sparkles")
-                                        .font(.system(size: 11))
-                                    Text("Safe Sweep")
-                                    Text(viewModel.formattedSafeSweepBytes)
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                }
-                                .font(.system(size: 12, weight: .medium))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                            }
-                            .buttonStyle(.glass)
-                            .disabled(viewModel.isScanning)
-                            .help("Select \(viewModel.safeSweepItems.count) rebuildable artifacts inactive for \(viewModel.safeSweepMinimumStaleDays)+ days")
-                        }
-
+                HStack(spacing: 8) {
+                    if viewModel.safeSweepTotalBytes > 0 {
                         Button {
-                            viewModel.startScan()
+                            viewModel.applySafeSweepSelection(andPreview: true)
                         } label: {
-                            Group {
-                                if viewModel.isScanning {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                } else {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 12, weight: .medium))
-                                }
+                            HStack(spacing: 5) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 11))
+                                Text("Safe Sweep")
+                                Text(viewModel.formattedSafeSweepBytes)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
                             }
-                            .frame(width: 20, height: 18)
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
                         }
-                        .buttonStyle(.glass)
+                        .buttonStyle(.bordered)
                         .disabled(viewModel.isScanning)
-                        .help("Rescan")
+                        .help("Select \(viewModel.safeSweepItems.count) rebuildable artifacts inactive for \(viewModel.safeSweepMinimumStaleDays)+ days")
                     }
+
+                    Button {
+                        viewModel.startScan()
+                    } label: {
+                        Group {
+                            if viewModel.isScanning {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                        }
+                        .frame(width: 20, height: 18)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.isScanning)
+                    .help("Rescan")
                 }
             }
 

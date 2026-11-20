@@ -25,7 +25,7 @@ public struct AuditHistoryView: View {
                     let store = AuditLogStore()
                     viewModel.revealInFinder(store.storageDirectory)
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
             }
 
@@ -89,7 +89,7 @@ public struct AuditHistoryView: View {
                             Text("Copy Rebuild Script")
                         }
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help("Copies a shell script to re-bootstrap dependencies for projects in this session")
                 }
@@ -98,7 +98,7 @@ public struct AuditHistoryView: View {
                     Button("Restore (\(restorableCount))") {
                         viewModel.undoCleanupSession(session)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
             }

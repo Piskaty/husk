@@ -136,7 +136,7 @@ public struct DryRunPreviewSheet: View {
                 Button("Cancel") {
                     viewModel.isShowingDryRunPreview = false
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.bordered)
                 .keyboardShortcut(.cancelAction)
 
                 Button {
@@ -150,7 +150,7 @@ public struct DryRunPreviewSheet: View {
                     .font(.system(size: 12, weight: .medium))
                     .padding(.horizontal, 8)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(.borderedProminent)
                 .tint(viewModel.deletionMode == .moveToTrash ? nil : .red)
                 .keyboardShortcut(.defaultAction)
             }

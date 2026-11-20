@@ -227,9 +227,8 @@ public struct MainWorkspaceView: View {
             .padding(.vertical, 6)
             .background {
                 if isSelected {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(Color.primary.opacity(0.04))
-                        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.08))
                 }
             }
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
@@ -416,7 +415,7 @@ public struct MainWorkspaceView: View {
                     Button("Copy Rebuild Script") {
                         viewModel.copyRebuildScript(for: undoSession)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
 
@@ -424,7 +423,7 @@ public struct MainWorkspaceView: View {
                     Button("Undo") {
                         viewModel.undoCleanupSession(undoSession)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
             }
@@ -440,7 +439,10 @@ public struct MainWorkspaceView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+        )
     }
 
     // MARK: - Clean Artifact List
@@ -533,7 +535,7 @@ public struct MainWorkspaceView: View {
                     viewModel.selectedStalenessBucket = nil
                     viewModel.searchText = ""
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .padding(.top, 4)
             }
@@ -541,7 +543,7 @@ public struct MainWorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - Liquid Glass Bottom Footer with Free Space Projection
+    // MARK: - Bottom Footer with Free Space Projection
 
     private var bottomActionFooter: some View {
         HStack(spacing: 12) {
@@ -581,7 +583,7 @@ public struct MainWorkspaceView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 3)
             }
-            .buttonStyle(.glassProminent)
+            .buttonStyle(.borderedProminent)
             .disabled(viewModel.selectedItems.isEmpty)
         }
         .padding(.horizontal, 28)

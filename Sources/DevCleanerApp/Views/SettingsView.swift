@@ -25,7 +25,7 @@ public struct SettingsView: View {
                 Button("Restore Defaults") {
                     viewModel.resetDefaults()
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
             }
 
@@ -65,38 +65,36 @@ public struct SettingsView: View {
 
                     Spacer()
 
-                    GlassEffectContainer(spacing: 8) {
-                        HStack(spacing: 8) {
-                            if case .updateAvailable(let release, _) = viewModel.updateStatus {
-                                Button {
-                                    viewModel.openUpdateDownload(release)
-                                } label: {
-                                    Label("Download \(release.version)", systemImage: "arrow.down.circle")
-                                        .font(.system(size: 12, weight: .medium))
-                                }
-                                .buttonStyle(.glassProminent)
-                                .controlSize(.small)
-                            }
-
+                    HStack(spacing: 8) {
+                        if case .updateAvailable(let release, _) = viewModel.updateStatus {
                             Button {
-                                viewModel.checkForUpdates()
+                                viewModel.openUpdateDownload(release)
                             } label: {
-                                HStack(spacing: 5) {
-                                    if viewModel.updateStatus == .checking {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                    } else {
-                                        Image(systemName: "arrow.clockwise")
-                                            .font(.system(size: 11))
-                                    }
-                                    Text(viewModel.updateStatus == .checking ? "Checking…" : "Check for Updates")
-                                        .font(.system(size: 12, weight: .medium))
-                                }
+                                Label("Download \(release.version)", systemImage: "arrow.down.circle")
+                                    .font(.system(size: 12, weight: .medium))
                             }
-                            .buttonStyle(.glass)
+                            .buttonStyle(.borderedProminent)
                             .controlSize(.small)
-                            .disabled(viewModel.updateStatus == .checking)
                         }
+
+                        Button {
+                            viewModel.checkForUpdates()
+                        } label: {
+                            HStack(spacing: 5) {
+                                if viewModel.updateStatus == .checking {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 11))
+                                }
+                                Text(viewModel.updateStatus == .checking ? "Checking…" : "Check for Updates")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(viewModel.updateStatus == .checking)
                     }
                 }
 
@@ -299,7 +297,7 @@ public struct SettingsView: View {
                     Button("Add Excluded Folder…") {
                         viewModel.promptToAddIgnoredPath()
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
 
