@@ -283,7 +283,7 @@ public struct CommandPaletteView: View {
                     title: "Undo Last Cleanup",
                     subtitle: "Restore \(undoable.restorableItemCount) items from Trash",
                     systemImage: "arrow.uturn.backward",
-                    badgeText: undoable.formattedTotalReclaimed,
+                    badgeText: nil,
                     perform: { viewModel.undoCleanupSession(undoable) }
                 ),
                 at: 1

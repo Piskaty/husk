@@ -14,6 +14,7 @@ public enum SidebarDestination: Hashable, Identifiable {
     case shieldedProjects
     case tier(SafetyTier)
     case auditHistory
+    case changelog
     case settings
 
     public var id: String {
@@ -27,6 +28,7 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .shieldedProjects: return "shielded_projects"
         case .tier(let tier): return "tier_\(tier.rawValue)"
         case .auditHistory: return "audit_history"
+        case .changelog: return "changelog"
         case .settings: return "settings"
         }
     }
@@ -42,6 +44,7 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .shieldedProjects: return "Protected"
         case .tier(let tier): return tier.shortLabel
         case .auditHistory: return "History"
+        case .changelog: return "Changelog"
         case .settings: return "Settings"
         }
     }
@@ -57,6 +60,7 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .shieldedProjects: return "Protected due to recent activity, dirty git tree, or active lock"
         case .tier(let tier): return tier.explanation
         case .auditHistory: return "Past cleanup sessions with 1-click restore from Trash and rebuild scripts"
+        case .changelog: return "Changes in every Husk release"
         case .settings: return "Configure safety thresholds, scan scope, exclusions, menu bar alerts, and app updates"
         }
     }
@@ -72,6 +76,7 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .shieldedProjects: return "shield"
         case .tier(let tier): return tier.badgeIcon
         case .auditHistory: return "clock.arrow.circlepath"
+        case .changelog: return "list.bullet.rectangle"
         case .settings: return "gearshape"
         }
     }
@@ -168,7 +173,11 @@ public final class AppViewModel {
     public var lastScanDurationSeconds: Double? = nil
 
     public var isShowingCommandPalette: Bool = false
+    public private(set) var isCleaning = false
     public var isShowingDryRunPreview: Bool = false
+    public private(set) var changelog: [ChangelogRelease] = []
+    public private(set) var whatsNew: [ChangelogRelease] = []
+    public var isShowingWhatsNew = false
     public var activeDryRunManifest: DryRunManifest? = nil
     public var auditSessions: [CleanupSessionRecord] = []
     public var statusBanner: StatusBannerState? = nil
@@ -191,6 +200,7 @@ public final class AppViewModel {
         static let deletionMode = "Husk.DeletionMode.v1"
         static let updateSource = "Husk.UpdateSource.v1"
         static let autoCheckForUpdates = "Husk.AutoCheckForUpdates.v1"
+        static let lastLaunchedVersion = "Husk.LastLaunchedVersion.v1"
     }
 
     public init() {
@@ -232,6 +242,28 @@ public final class AppViewModel {
         self.launchAtLoginEnabled = (SMAppService.mainApp.status == .enabled)
         self.auditSessions = auditStore.loadSessions()
         self.diskSpace = DiskSpaceSnapshot.current()
+        loadChangelog(using: defaults)
+    }
+
+    private func loadChangelog(using defaults: UserDefaults) {
+        let bundleURL = Bundle.main.url(forResource: "CHANGELOG", withExtension: "md")
+        #if DEBUG
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("CHANGELOG.md")
+        let changelogURL = bundleURL ?? sourceURL
+        #else
+        guard let changelogURL = bundleURL else { return }
+        #endif
+
+        guard let markdown = try? String(contentsOf: changelogURL, encoding: .utf8),
+              let current = SemanticVersion(string: UpdateService.currentAppVersion) else { return }
+        changelog = ChangelogRelease.parse(markdown)
+        let previous = defaults.string(forKey: Keys.lastLaunchedVersion).flatMap(SemanticVersion.init(string:))
+        whatsNew = ChangelogRelease.whatsNew(in: changelog, current: current, previous: previous)
+        isShowingWhatsNew = !whatsNew.isEmpty
+        defaults.set(current.description, forKey: Keys.lastLaunchedVersion)
     }
 
     // MARK: - Computed Metrics
@@ -346,14 +378,6 @@ public final class AppViewModel {
         isLowDiskSpace || isAboveJunkThreshold || hasAvailableUpdate
     }
 
-    public var projectedFreeAfterSelectedBytes: Int64 {
-        diskSpace.freeBytes + selectedTotalBytes
-    }
-
-    public var projectedFreeAfterSafeSweepBytes: Int64 {
-        diskSpace.freeBytes + safeSweepTotalBytes
-    }
-
     public func bytes(for category: CleanupCategory) -> Int64 {
         items.filter { $0.category == category }.reduce(0) { $0 + $1.allocatedSizeBytes }
     }
@@ -390,7 +414,7 @@ public final class AppViewModel {
             result = result.filter(\.protection.isShielded)
         case .tier(let tier):
             result = result.filter { $0.effectiveSafetyTier == tier }
-        case .auditHistory, .settings:
+        case .auditHistory, .changelog, .settings:
             break
         }
 
@@ -446,6 +470,7 @@ public final class AppViewModel {
     }
 
     public func startScan() {
+        guard !isCleaning else { return }
         scanTask?.cancel()
         isScanning = true
         refreshDiskSpace()
@@ -579,7 +604,11 @@ public final class AppViewModel {
     }
 
     public func installUpdateAndRelaunch(_ release: AppReleaseInfo) {
-        guard !updateInstallPhase.isInProgress else { return }
+        guard !isCleaning, !updateInstallPhase.isInProgress else { return }
+        guard release.canInstallInApp else {
+            openReleasePage(release)
+            return
+        }
         updateInstallPhase = .downloading
         let service = updateService
         let targetBundle = UpdateService.resolveCurrentInstallBundleURL()
@@ -615,7 +644,9 @@ public final class AppViewModel {
     }
 
     public func openReleasePage(_ release: AppReleaseInfo) {
-        NSWorkspace.shared.open(release.releasePageURL ?? release.downloadURL)
+        let url = [release.releasePageURL, release.downloadURL].compactMap { $0 }
+            .first { $0.scheme?.lowercased() == "https" && $0.host != nil }
+        if let url { NSWorkspace.shared.open(url) }
     }
 
     // MARK: - Selection & Execution
@@ -663,91 +694,93 @@ public final class AppViewModel {
 
     public func openDryRunPreview() {
         let targets = selectedItems
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty, !isCleaning, !updateInstallPhase.isInProgress else { return }
         let executor = makeExecutor()
         activeDryRunManifest = executor.buildDryRunManifest(items: targets, mode: deletionMode)
         isShowingDryRunPreview = true
     }
 
-    public func executeConfirmedCleanup(dryRunOnly: Bool = false) {
-        let targets = selectedItems
-        guard !targets.isEmpty else {
-            isShowingDryRunPreview = false
-            return
-        }
+    public func executeConfirmedCleanup(dryRunOnly: Bool = false, allowIrreversibleToolTasks: Bool = false) {
+        guard let manifest = activeDryRunManifest, !manifest.items.isEmpty,
+              !isCleaning, !updateInstallPhase.isInProgress else { return }
 
         let executor = makeExecutor()
-        do {
-            let session = try executor.execute(
-                items: targets,
-                mode: deletionMode,
-                dryRun: dryRunOnly,
-                allowedWorkspaceRoots: workspaceRoots
-            )
-            auditSessions = auditStore.loadSessions()
-            isShowingDryRunPreview = false
-            refreshDiskSpace()
+        let roots = workspaceRoots
+        isShowingDryRunPreview = false
+        isCleaning = true
+        scanTask?.cancel()
+        isScanning = false
+        statusBanner = nil
 
-            if dryRunOnly {
-                statusBanner = StatusBannerState(
-                    title: "Dry-Run Logged",
-                    subtitle: "Simulated \(targets.count) items (\(session.formattedTotalReclaimed)) with zero files modified.",
-                    isSuccess: true,
-                    undoableSession: nil
-                )
-            } else {
-                let failedCount = session.items.filter { $0.errorDescription != nil }.count
-                let cleanedPaths = Set(
-                    session.items
-                        .filter { $0.errorDescription == nil }
-                        .map(\.originalPath)
-                )
-                allScannedItems.removeAll { cleanedPaths.contains($0.path.path) }
-                selectedIDs.removeAll()
-
-                let actionVerb = deletionMode == .moveToTrash ? "Moved to Trash" : "Deleted"
-                let sub = failedCount == 0
-                    ? "\(actionVerb) \(cleanedPaths.count) items · \(diskSpace.formattedFree) now free."
-                    : "\(actionVerb) \(cleanedPaths.count) items (\(failedCount) skipped)."
-
-                statusBanner = StatusBannerState(
-                    title: "Reclaimed \(session.formattedTotalReclaimed)",
-                    subtitle: sub,
-                    isSuccess: true,
-                    undoableSession: session
-                )
+        Task {
+            defer {
+                isCleaning = false
+                if !dryRunOnly { startScan() }
             }
-        } catch {
-            isShowingDryRunPreview = false
-            statusBanner = StatusBannerState(
-                title: "Cleanup Error",
-                subtitle: error.localizedDescription,
-                isSuccess: false,
-                undoableSession: nil
-            )
+            do {
+                let session = try await Task.detached(priority: .userInitiated) {
+                    try executor.execute(
+                        items: manifest.items,
+                        mode: manifest.mode,
+                        dryRun: dryRunOnly,
+                        allowedWorkspaceRoots: roots,
+                        allowIrreversibleToolTasks: allowIrreversibleToolTasks
+                    )
+                }.value
+                auditSessions = auditStore.loadSessions()
+                refreshDiskSpace()
+
+                let failures = session.items.filter { $0.errorDescription != nil }
+                let successCount = session.items.count - failures.count
+                if !dryRunOnly {
+                    let cleanedPaths = Set(session.items.filter { $0.errorDescription == nil }.map(\.originalPath))
+                    allScannedItems.removeAll { cleanedPaths.contains($0.path.path) }
+                    selectedIDs.removeAll()
+                }
+
+                let subtitle = successCount == 0
+                    ? failures.first?.errorDescription ?? "No items were processed."
+                    : "\(successCount) item(s) · \(session.storageSummary)" +
+                        (failures.isEmpty ? "" : " · \(failures.count) skipped. See History for details.")
+                statusBanner = StatusBannerState(
+                    title: dryRunOnly ? "Dry-Run Logged" : (successCount > 0 ? "Cleanup Finished" : "Cleanup Blocked"),
+                    subtitle: subtitle,
+                    isSuccess: successCount > 0,
+                    undoableSession: dryRunOnly ? nil : session
+                )
+            } catch {
+                statusBanner = StatusBannerState(title: "Cleanup Error", subtitle: error.localizedDescription, isSuccess: false)
+            }
         }
     }
 
     public func undoCleanupSession(_ session: CleanupSessionRecord) {
+        guard !isCleaning, !updateInstallPhase.isInProgress else { return }
         let executor = makeExecutor()
-        do {
-            let updated = try executor.undoSession(session)
-            auditSessions = auditStore.loadSessions()
-            let restoredCount = updated.items.filter(\.isRestored).count
-            statusBanner = StatusBannerState(
-                title: "Restored \(restoredCount) Item(s)",
-                subtitle: "Original files returned from Trash.",
-                isSuccess: true,
-                undoableSession: nil
-            )
-            startScan()
-        } catch {
-            statusBanner = StatusBannerState(
-                title: "Restore Failed",
-                subtitle: error.localizedDescription,
-                isSuccess: false,
-                undoableSession: nil
-            )
+        isCleaning = true
+        scanTask?.cancel()
+        isScanning = false
+        statusBanner = nil
+
+        Task {
+            defer {
+                isCleaning = false
+                startScan()
+            }
+            do {
+                let updated = try await Task.detached(priority: .userInitiated) {
+                    try executor.undoSession(session)
+                }.value
+                auditSessions = auditStore.loadSessions()
+                let restoredCount = updated.items.filter(\.isRestored).count - session.items.filter(\.isRestored).count
+                statusBanner = StatusBannerState(
+                    title: "Restored \(restoredCount) item(s)",
+                    subtitle: restoredCount > 0 ? "Files returned from Trash." : "Check the Trash and original paths.",
+                    isSuccess: restoredCount > 0
+                )
+            } catch {
+                statusBanner = StatusBannerState(title: "Restore Failed", subtitle: error.localizedDescription, isSuccess: false)
+            }
         }
     }
 

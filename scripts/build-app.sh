@@ -7,8 +7,8 @@ cd "$PROJECT_ROOT"
 
 CONFIG="release"
 RUN_AFTER_BUILD=false
-VERSION="${HUSK_VERSION:-1.0.4}"
-BUILD_NUMBER="${HUSK_BUILD_NUMBER:-5}"
+VERSION="${HUSK_VERSION:-1.0.5}"
+BUILD_NUMBER="${HUSK_BUILD_NUMBER:-6}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -26,17 +26,16 @@ done
 
 echo "▸ Building Husk v$VERSION ($CONFIG)..."
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/tmp/clang-module-cache}"
-swift build -c "$CONFIG" \
-  --disable-sandbox \
-  --cache-path /tmp/swiftpm-cache \
-  -Xswiftc -module-cache-path \
-  -Xswiftc "$CLANG_MODULE_CACHE_PATH"
+export SWIFTPM_MODULECACHE_OVERRIDE="$CLANG_MODULE_CACHE_PATH"
+SWIFT_BUILD_ARGS=(-c "$CONFIG" --disable-sandbox --cache-path /tmp/swiftpm-cache)
+swift build "${SWIFT_BUILD_ARGS[@]}" -Xswiftc -module-cache-path -Xswiftc "$CLANG_MODULE_CACHE_PATH"
 
-BIN_DIR="$PROJECT_ROOT/.build/$CONFIG"
+BIN_DIR="$(swift build "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)"
 BINARY_PATH="$BIN_DIR/DevCleanerApp"
 
 if [[ ! -f "$BINARY_PATH" ]]; then
-  BINARY_PATH="$(find "$PROJECT_ROOT/.build" -name DevCleanerApp -type f | head -n 1)"
+  echo "Missing compiled binary: $BINARY_PATH" >&2
+  exit 1
 fi
 
 APP_BUNDLE="$PROJECT_ROOT/dist/Husk.app"
@@ -49,6 +48,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BINARY_PATH" "$MACOS_DIR/Husk"
 chmod +x "$MACOS_DIR/Husk"
+cp "$PROJECT_ROOT/CHANGELOG.md" "$RESOURCES_DIR/CHANGELOG.md"
 
 # Generate native AppIcon.icns directly
 swift -module-cache-path "$CLANG_MODULE_CACHE_PATH" "$SCRIPT_DIR/generate-icon.swift" "$RESOURCES_DIR/AppIcon.icns"
@@ -92,9 +92,8 @@ printf "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
 # Code sign (uses DEVELOPER_ID_APPLICATION if provided, otherwise ad-hoc signs)
 SIGN_IDENTITY="${DEVELOPER_ID_APPLICATION:--}"
-if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_BUNDLE" 2>/dev/null || true
-fi
+/usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 
 echo "✓ Packaged native macOS bundle at: $APP_BUNDLE"
 

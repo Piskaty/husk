@@ -86,14 +86,17 @@ public struct SettingsView: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
 
-                                Button {
-                                    viewModel.installUpdateAndRelaunch(release)
-                                } label: {
-                                    Label("Update & Relaunch (\(release.version))", systemImage: "arrow.down.circle.fill")
-                                        .font(.system(size: 12, weight: .medium))
+                                if release.canInstallInApp {
+                                    Button {
+                                        viewModel.installUpdateAndRelaunch(release)
+                                    } label: {
+                                        Label("Update & Relaunch (\(release.version))", systemImage: "arrow.down.circle.fill")
+                                            .font(.system(size: 12, weight: .medium))
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                    .disabled(viewModel.isCleaning)
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
                             }
                         }
 
@@ -152,7 +155,7 @@ public struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Update Feed (GitHub Repo or Website JSON URL)")
                             .font(.system(size: 12.5, weight: .medium))
-                        Text("Accepts 'owner/repo' (GitHub Releases API) or 'https://example.com/latest.json'")
+                        Text("Use GitHub Releases or an HTTPS manifest. In-app installs require a signed Husk ZIP.")
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                     }

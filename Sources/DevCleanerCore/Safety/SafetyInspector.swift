@@ -1,4 +1,19 @@
+import Darwin
 import Foundation
+
+struct CleanupTargetIdentity: Codable, Equatable, Sendable {
+    let device: UInt64
+    let inode: UInt64
+    let creationDate: Date?
+
+    static func read(at url: URL) -> Self? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let device = attributes[.systemNumber] as? NSNumber,
+              let inode = attributes[.systemFileNumber] as? NSNumber else { return nil }
+        return Self(device: device.uint64Value, inode: inode.uint64Value,
+                    creationDate: attributes[.creationDate] as? Date)
+    }
+}
 
 public actor GitInspectionCache {
     public struct CachedGitState: Sendable {
@@ -83,10 +98,7 @@ public actor GitInspectionCache {
             }
         }
 
-        var isDirty = false
-        if runGitProcess {
-            isDirty = checkGitDirtyStatus(at: gitRoot)
-        }
+        let isDirty = runGitProcess && checkGitDirtyStatus(at: gitRoot)
         if isDirty {
             isReadOnlyClone = false
         }
@@ -102,13 +114,7 @@ public actor GitInspectionCache {
 
     private static func checkGitDirtyStatus(at gitRoot: URL) -> Bool {
         let gitExecutable = URL(fileURLWithPath: "/usr/bin/git")
-        guard FileManager.default.isExecutableFile(atPath: gitExecutable.path) else {
-            return false
-        }
-
-        let process = Process()
-        process.executableURL = gitExecutable
-        process.arguments = [
+        let arguments = [
             "-C", gitRoot.path,
             "--no-optional-locks",
             "status",
@@ -116,34 +122,8 @@ public actor GitInspectionCache {
             "--untracked-files=no"
         ]
 
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-
-        let deadline = Date().addingTimeInterval(1.5)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-        if process.isRunning {
-            process.terminate()
-            return false
-        }
-
-        guard process.terminationStatus == 0 else {
-            return false
-        }
-
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else {
-            return false
-        }
+        guard let output = try? CommandRunner.run(gitExecutable.path, arguments: arguments,
+                                                  timeout: 5, captureOutput: true) else { return true }
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
@@ -154,9 +134,9 @@ public struct SafetyInspector: Sendable {
     private let gitCache: GitInspectionCache
 
     private static let forbiddenAbsolutePrefixes: [String] = [
-        "/System",
-        "/Library",
-        "/Applications",
+        "/system",
+        "/library",
+        "/applications",
         "/usr",
         "/bin",
         "/sbin",
@@ -165,7 +145,7 @@ public struct SafetyInspector: Sendable {
         "/private/etc",
         "/private/var/db",
         "/private/var/root",
-        "/Volumes"
+        "/volumes"
     ]
 
     private static let forbiddenHomeRelativePaths: [String] = [
@@ -208,8 +188,8 @@ public struct SafetyInspector: Sendable {
     }
 
     public func isForbiddenPath(_ url: URL) -> Bool {
-        let standardized = url.standardizedFileURL.path
-        if standardized == "/" || standardized == homeDirectory.path {
+        let standardized = Self.platformPath(url).lowercased()
+        if standardized == "/" || standardized == Self.platformPath(homeDirectory).lowercased() {
             return true
         }
 
@@ -220,7 +200,7 @@ public struct SafetyInspector: Sendable {
         }
 
         for rel in Self.forbiddenHomeRelativePaths {
-            let full = homeDirectory.appendingPathComponent(rel).standardizedFileURL.path
+            let full = Self.platformPath(homeDirectory.appendingPathComponent(rel)).lowercased()
             if standardized == full || standardized.hasPrefix(full + "/") {
                 return true
             }
@@ -230,43 +210,24 @@ public struct SafetyInspector: Sendable {
     }
 
     public func validateDeletionTarget(_ targetURL: URL, allowedWorkspaceRoots: [URL]) -> Result<Void, SafetyValidationError> {
-        if Self.isSymbolicLink(at: targetURL) {
-            return .failure(.symbolicLinkRejected(targetURL.path))
+        if case .failure(let error) = validatePath(targetURL, protectedRoots: allowedWorkspaceRoots) {
+            return .failure(error)
         }
 
-        let standardized = targetURL.standardizedFileURL
-        if isForbiddenPath(standardized) {
-            return .failure(.forbiddenSystemOrPersonalPath(standardized.path))
-        }
-
-        for root in allowedWorkspaceRoots {
-            let rootPath = root.standardizedFileURL.path
-            if standardized.path == rootPath {
-                return .failure(.cannotDeleteScanRootItself(standardized.path))
-            }
-        }
-
+        let path = Self.platformPath(targetURL)
         let isInsideWorkspace = allowedWorkspaceRoots.contains { root in
-            let rootPrefix = root.standardizedFileURL.path.hasSuffix("/")
-                ? root.standardizedFileURL.path
-                : root.standardizedFileURL.path + "/"
-            return standardized.path.hasPrefix(rootPrefix)
+            Self.contains(path, in: Self.platformPath(root))
         }
 
         let isKnownFixedCache = CleanupRuleRegistry.fixedCacheRules.contains { rule in
-            let cacheURL = homeDirectory.appendingPathComponent(rule.relativePathFromHome).standardizedFileURL
-            if standardized.path == cacheURL.path {
-                return true
-            }
-            let prefix = cacheURL.path.hasSuffix("/") ? cacheURL.path : cacheURL.path + "/"
-            return standardized.path.hasPrefix(prefix)
+            Self.contains(path, in: Self.platformPath(homeDirectory.appendingPathComponent(rule.relativePathFromHome)))
         }
 
-        let simDevicesURL = homeDirectory.appendingPathComponent("Library/Developer/CoreSimulator/Devices").standardizedFileURL
-        let isSimDevices = standardized.path == simDevicesURL.path || standardized.path.hasPrefix(simDevicesURL.path + "/")
+        let simDevicesURL = homeDirectory.appendingPathComponent("Library/Developer/CoreSimulator/Devices")
+        let isSimDevices = Self.contains(path, in: Self.platformPath(simDevicesURL))
 
         guard isInsideWorkspace || isKnownFixedCache || isSimDevices else {
-            return .failure(.outsideAllowedBoundaries(standardized.path))
+            return .failure(.outsideAllowedBoundaries(targetURL.path))
         }
 
         return .success(())
@@ -275,29 +236,68 @@ public struct SafetyInspector: Sendable {
     /// Validates a `CleanupItem`, including linked git worktrees whose main repository resides in `allowedWorkspaceRoots`.
     public func validateDeletionItem(_ item: CleanupItem, allowedWorkspaceRoots: [URL]) -> Result<Void, SafetyValidationError> {
         if let worktree = item.worktree {
-            let target = item.path.standardizedFileURL
-            if Self.isSymbolicLink(at: target) {
-                return .failure(.symbolicLinkRejected(target.path))
+            let mainURL = URL(fileURLWithPath: worktree.mainRepoPath, isDirectory: true)
+            if case .failure(let error) = validatePath(item.path, protectedRoots: allowedWorkspaceRoots + [mainURL]) {
+                return .failure(error)
             }
-            if isForbiddenPath(target) {
-                return .failure(.forbiddenSystemOrPersonalPath(target.path))
-            }
-            let mainURL = URL(fileURLWithPath: worktree.mainRepoPath).standardizedFileURL
-            if target.path == mainURL.path {
-                return .failure(.cannotDeleteScanRootItself(target.path))
+            if case .failure(let error) = validatePath(mainURL.appendingPathComponent(".git/worktrees"), protectedRoots: []) {
+                return .failure(error)
             }
             let mainInWorkspace = allowedWorkspaceRoots.contains { root in
-                let rootPrefix = root.standardizedFileURL.path.hasSuffix("/")
-                    ? root.standardizedFileURL.path
-                    : root.standardizedFileURL.path + "/"
-                return mainURL.path.hasPrefix(rootPrefix) || mainURL.path == root.standardizedFileURL.path
+                Self.contains(Self.platformPath(mainURL), in: Self.platformPath(root))
             }
-            guard mainInWorkspace else {
-                return .failure(.outsideAllowedBoundaries(target.path))
-            }
-            return .success(())
+            return mainInWorkspace ? .success(()) : .failure(.outsideAllowedBoundaries(item.path.path))
         }
         return validateDeletionTarget(item.path, allowedWorkspaceRoots: allowedWorkspaceRoots)
+    }
+
+    private func validatePath(_ url: URL, protectedRoots: [URL]) -> Result<Void, SafetyValidationError> {
+        let path = Self.platformPath(url)
+        if let error = Self.pathComponentError(for: url) {
+            return .failure(error)
+        }
+        if isForbiddenPath(url) {
+            return .failure(.forbiddenSystemOrPersonalPath(url.path))
+        }
+        let identity = CleanupTargetIdentity.read(at: url)
+        if protectedRoots.contains(where: {
+            Self.contains(Self.platformPath($0), in: path) ||
+                (identity != nil && CleanupTargetIdentity.read(at: $0) == identity)
+        }) {
+            return .failure(.cannotDeleteScanRootItself(url.path))
+        }
+        return .success(())
+    }
+
+    static func pathComponentError(for url: URL) -> SafetyValidationError? {
+        var path = ""
+        for component in platformPath(url).split(separator: "/") {
+            path += "/" + component
+            var info = stat()
+            if lstat(path, &info) == 0 {
+                if info.st_mode & S_IFMT == S_IFLNK {
+                    return .symbolicLinkRejected(url.path)
+                }
+            } else if errno == ENOENT {
+                return nil  // Missing leaf/descendants have no symlinks to traverse.
+            } else {
+                return .targetChanged(url.path)
+            }
+        }
+        return nil
+    }
+
+    static func platformPath(_ url: URL) -> String {
+        let path = url.standardizedFileURL.path
+        // These macOS aliases have stable system-owned targets.
+        if ["/var", "/tmp", "/etc"].contains(where: { contains(path, in: $0) }) {
+            return "/private" + path
+        }
+        return path
+    }
+
+    private static func contains(_ path: String, in root: String) -> Bool {
+        path == root || path.hasPrefix(root == "/" ? "/" : root + "/")
     }
 
     // MARK: - Layer 2: Parent-Manifest Verification
@@ -487,6 +487,7 @@ public enum SafetyValidationError: Error, LocalizedError, Sendable, Equatable {
     case forbiddenSystemOrPersonalPath(String)
     case cannotDeleteScanRootItself(String)
     case outsideAllowedBoundaries(String)
+    case targetChanged(String)
 
     public var errorDescription: String? {
         switch self {
@@ -498,6 +499,8 @@ public enum SafetyValidationError: Error, LocalizedError, Sendable, Equatable {
             return "Cannot delete a root workspace folder itself: \(path)"
         case .outsideAllowedBoundaries(let path):
             return "Path is outside configured workspace and cache boundaries: \(path)"
+        case .targetChanged(let path):
+            return "The target changed since the scan or is inaccessible. Rescan before cleaning: \(path)"
         }
     }
 }

@@ -30,6 +30,12 @@ public struct MainWorkspaceView: View {
             .sheet(isPresented: $viewModel.isShowingDryRunPreview) {
                 DryRunPreviewSheet(viewModel: viewModel)
             }
+            .sheet(isPresented: $viewModel.isShowingWhatsNew) {
+                WhatsNewSheet(releases: viewModel.whatsNew) {
+                    viewModel.isShowingWhatsNew = false
+                    viewModel.sidebarDestination = .changelog
+                }
+            }
 
             if viewModel.isShowingCommandPalette {
                 CommandPaletteView(viewModel: viewModel)
@@ -117,6 +123,8 @@ public struct MainWorkspaceView: View {
                             destination: .auditHistory,
                             trailingText: viewModel.auditSessions.isEmpty ? nil : "\(viewModel.auditSessions.count)"
                         )
+
+                        sidebarItem(destination: .changelog, trailingText: nil)
 
                         sidebarItem(
                             destination: .settings,
@@ -249,6 +257,8 @@ public struct MainWorkspaceView: View {
         VStack(spacing: 0) {
             if viewModel.sidebarDestination == .auditHistory {
                 AuditHistoryView(viewModel: viewModel)
+            } else if viewModel.sidebarDestination == .changelog {
+                ChangelogView(releases: viewModel.changelog)
             } else if viewModel.sidebarDestination == .settings {
                 SettingsView(viewModel: viewModel)
             } else {
@@ -427,11 +437,12 @@ public struct MainWorkspaceView: View {
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    Button("Update & Relaunch") {
+                    Button(release.canInstallInApp ? "Update & Relaunch" : "Release Notes") {
                         viewModel.installUpdateAndRelaunch(release)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
+                    .disabled(viewModel.isCleaning)
                 }
             }
 
@@ -599,17 +610,13 @@ public struct MainWorkspaceView: View {
             Button {
                 viewModel.openDryRunPreview()
             } label: {
-                Text(
-                    viewModel.selectedItems.isEmpty
-                        ? "Move to Trash…"
-                        : "Move to Trash (\(viewModel.formattedSelectedBytes))…"
-                )
+                Text(viewModel.isCleaning ? "Working…" : "Review Cleanup…")
                 .font(.system(size: 12, weight: .medium))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 3)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(viewModel.selectedItems.isEmpty)
+            .disabled(viewModel.selectedItems.isEmpty || viewModel.isCleaning)
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 10)
@@ -621,10 +628,6 @@ public struct MainWorkspaceView: View {
     private var footerDiskSummaryText: String {
         guard viewModel.diskSpace.freeBytes > 0 else {
             return viewModel.scanProgressText
-        }
-        if viewModel.selectedTotalBytes > 0 {
-            let projected = ByteFormatting.string(from: viewModel.projectedFreeAfterSelectedBytes)
-            return "Mac Disk: \(viewModel.diskSpace.formattedFree) free → \(projected) after clean"
         }
         return "\(viewModel.items.count) items · \(viewModel.diskSpace.formattedFree) free on Mac"
     }

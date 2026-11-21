@@ -12,7 +12,7 @@ A quiet, native macOS Liquid Glass developer disk & cache cleaner engineered for
   <a href="https://github.com/Piskaty/husk/releases/latest">
     <img src="https://img.shields.io/github/v/release/Piskaty/husk?style=flat-square&color=22c55e&label=release" alt="Latest Release" />
   </a>
-  <img src="https://img.shields.io/badge/macOS-26%2B%20Liquid%20Glass-111827?style=flat-square&logo=apple&logoColor=white" alt="macOS 26+" />
+  <img src="https://img.shields.io/badge/macOS-14%2B-111827?style=flat-square&logo=apple&logoColor=white" alt="macOS 14+" />
   <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-111827?style=flat-square" alt="Apple Silicon" />
   <img src="https://img.shields.io/badge/Swift-6-f05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 6" />
 </p>
@@ -22,12 +22,13 @@ A quiet, native macOS Liquid Glass developer disk & cache cleaner engineered for
   <a href="#5-layer-safety-engine">Safety Engine</a> ·
   <a href="#what-husk-cleans">What It Cleans</a> ·
   <a href="#smart-views--features">Features</a> ·
-  <a href="#keyboard-shortcuts">Shortcuts</a>
+  <a href="#keyboard-shortcuts">Shortcuts</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <br />
 
-<img src="assets/husk-preview.jpg" alt="Husk — Native macOS Liquid Glass Developer Disk Cleaner" width="100%" />
+<img src="assets/husk-screen.jpeg" alt="Husk showing package caches and storage by category" width="100%" />
 
 </div>
 
@@ -38,7 +39,7 @@ A quiet, native macOS Liquid Glass developer disk & cache cleaner engineered for
 Every macOS developer eventually loses 40–150 GB to forgotten `node_modules`, Rust `target/` folders, Swift `.build/` caches, Xcode `DerivedData`, global `bun`/`pnpm`/`npm`/`cargo`/`uv` stores, and bloated `.git/objects` packfiles.
 
 **Husk** is a lightweight, native SwiftUI + AppKit utility built to reclaim that space calmly and safely:
-- **True APFS Block Measurement**: Measures actual physical allocated disk blocks (`totalFileAllocatedSizeKey`) and deduplicates hard links (`pnpm`, `bun`) so reported savings match real macOS free space recovered.
+- **True APFS Block Measurement**: Measures actual physical allocated disk blocks (`totalFileAllocatedSizeKey`) and deduplicates hard links (`pnpm`, `bun`) to estimate the size of cleanup targets.
 - **Zero-Regret Safety**: Never deletes a folder named `target` or `build` unless its parent contains `Cargo.toml` / `build.gradle`, shields active or dirty Git repositories automatically, and moves items to **macOS Trash** with **1-Click Undo** by default.
 - **Native Liquid Glass & Menu Bar**: Feels right at home on macOS with desktop-blending translucency, keyboard-first `⌘K` navigation, and a live Menu Bar disk monitor.
 
@@ -88,17 +89,20 @@ Then open **Husk** from Applications or Spotlight.
 2. **Parent-Manifest Verification**: Folders named `target`, `build`, `.build`, or `node_modules` are only matched when paired with their sibling project manifest (`Cargo.toml`, `build.gradle`, `Package.swift`, `package.json`, `pyproject.toml`).
 3. **Active-Project Shield**: Inspects the enclosing `.git` repository for recent commits/modifications (configurable, default `7 days`), uncommitted tracked changes (`git status --porcelain`), and active lockfiles. Active repos are badged **Active** and excluded from automatic selection.
 4. **Regenerability Tiers**: Cleanly separates Tier 1 local rebuildable outputs, Tier 2 downloadable global caches, and Tier 3 protected items (active repos, Xcode `.xcarchive` dSYMs, local Ollama weights).
-5. **Trash-First & Audit Trail with 1-Click Undo**: Moves cleaned items to macOS Trash by default, writes JSON + Markdown logs to `~/Library/Application Support/Husk/audit-logs/`, and lets you restore any session in one click.
+5. **Trash-First & Audit Trail with 1-Click Undo**: Moves cleaned items to macOS Trash by default, writes JSON + Markdown logs to `~/Library/Application Support/Husk/audit-logs/`, and lets you restore items that were moved to Trash. Direct tool tasks, including worktree removal, require separate confirmation.
 
 ---
 
 ## Smart Views & Features
 
+![Husk workspace showing scanned artifacts and cleanup controls](assets/husk-preview.jpg)
+
 - **1-Click Safe Sweep (`⇧⌘S`)**: Selects only Tier 1 rebuildable artifacts in clean repositories untouched for 30+ days and shows a pre-flight confirmation manifest before touching a single byte.
 - **Dormant & Read-Only Clone Detector**: Inspects `.git/logs/HEAD` without spawning extra processes to surface repos you cloned once (`0` local commits) or left untouched for 120+ days.
 - **Copy Rebuild Command & Session Script**: Hover any project row to copy its exact lockfile-aware rebuild command (`cd ~/Projects/app && bun install`), or copy a full re-bootstrap shell script from **History**.
-- **Menu Bar & Low-Disk Monitor**: Displays live APFS free disk space, projected free space after cleaning, and a quiet menu bar indicator when disk space runs low or dev husks cross your configured threshold.
-- **Full Settings (`⌘,`) & Built-In Updater**: Configure safety windows, scan depth, excluded/pinned project folders (or right-click any row to exclude it), Launch at Login, and **Check for Updates…** via GitHub Releases or a custom website `latest.json` feed.
+- **Menu Bar & Low-Disk Monitor**: Displays live APFS free disk space and a quiet menu bar indicator when disk space runs low or dev husks cross your configured threshold.
+- **Full Settings (`⌘,`) & Built-In Updater**: Configure safety windows, scan depth, excluded/pinned project folders (or right-click any row to exclude it), Launch at Login, and **Check for Updates…** via GitHub Releases or a custom HTTPS feed serving signed updates.
+- **Changelog & What’s New**: Browse every release in the sidebar. On the first launch of a new version, Husk shows the changes since your previous version.
 
 ---
 
@@ -118,7 +122,7 @@ Then open **Husk** from Applications or Spotlight.
 
 ## Build from Source
 
-Requires macOS 26+ (Apple Silicon) and Swift 6 / Xcode Command Line Tools.
+Requires macOS 14+ (Apple Silicon) and Swift 6 / Xcode Command Line Tools.
 
 ```zsh
 # Clone and run locally
@@ -131,4 +135,11 @@ swift test
 
 # Build release artifacts (.app, .zip, .dmg, latest.json, SHA256SUMS.txt)
 ./scripts/package-release.sh --release
+```
+
+For a signed release, load the local release key and require a signature when packaging. GitHub Actions builds and tests the tag. Publish the resulting ZIP, ZIP signature, DMG (when available), `latest.json`, and `SHA256SUMS.txt` to the tagged GitHub Release. Use `dist/RELEASE_NOTES.md` for the release description.
+
+```zsh
+HUSK_UPDATE_SIGNING_KEY="$(< ~/.config/husk/update-signing-key)" \
+HUSK_REQUIRE_UPDATE_SIGNATURE=1 ./scripts/package-release.sh --release
 ```

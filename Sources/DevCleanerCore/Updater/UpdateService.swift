@@ -21,12 +21,14 @@ public struct SemanticVersion: Comparable, Equatable, Sendable, CustomStringConv
         }
         guard !cleaned.isEmpty else { return nil }
 
-        let parts = cleaned.split(separator: "-", maxSplits: 1).map(String.init)
+        let parts = cleaned.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
         let corePart = parts[0]
         let prereleasePart: String? = parts.count > 1 ? parts[1] : nil
 
-        let numbers = corePart.split(separator: ".").compactMap { Int($0) }
-        guard !numbers.isEmpty else { return nil }
+        let components = corePart.split(separator: ".", omittingEmptySubsequences: false)
+        let numbers = components.compactMap { Int($0) }
+        guard !numbers.isEmpty, numbers.count == components.count, numbers.count <= 3,
+              prereleasePart?.isEmpty != true else { return nil }
 
         self.major = numbers[0]
         self.minor = numbers.count > 1 ? numbers[1] : 0
@@ -66,6 +68,7 @@ public struct AppReleaseInfo: Codable, Sendable, Equatable {
     public let releaseNotes: String
     public let publishedAt: String?
     public let sha256: String?
+    public let signatureURL: URL?
 
     public init(
         version: String,
@@ -73,7 +76,8 @@ public struct AppReleaseInfo: Codable, Sendable, Equatable {
         releasePageURL: URL? = nil,
         releaseNotes: String = "",
         publishedAt: String? = nil,
-        sha256: String? = nil
+        sha256: String? = nil,
+        signatureURL: URL? = nil
     ) {
         self.version = version
         self.downloadURL = downloadURL
@@ -81,6 +85,13 @@ public struct AppReleaseInfo: Codable, Sendable, Equatable {
         self.releaseNotes = releaseNotes
         self.publishedAt = publishedAt
         self.sha256 = sha256
+        self.signatureURL = signatureURL
+    }
+
+    public var canInstallInApp: Bool {
+        guard let signatureURL else { return false }
+        return UpdateService.isHTTPS(downloadURL) && UpdateService.isHTTPS(signatureURL)
+            && downloadURL.pathExtension.lowercased() == "zip"
     }
 
     public var semanticVersion: SemanticVersion? {
@@ -126,8 +137,9 @@ public enum UpdateInstallPhase: Sendable, Equatable {
 }
 
 public struct UpdateService: Sendable {
-    public static let currentAppVersion = "1.0.4"
-    public static let currentBuildNumber = "5"
+    public static let currentAppVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.5"
+    public static let currentBuildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "6"
+    static let releaseSigningPublicKey = "uGF8YCWlDXzBpsDwjQlk48PxFdhUHB3RPUF/uhSiNaM="
     public static let defaultGitHubRepo = "Piskaty/husk"
 
     public init() {}
@@ -146,12 +158,12 @@ public struct UpdateService: Sendable {
         let endpointURL: URL
         let isGitHubAPI: Bool
 
-        if trimmed.hasPrefix("https://") || trimmed.hasPrefix("http://") {
-            guard let url = URL(string: trimmed) else {
-                return .failed(message: "Invalid update feed URL.")
+        if trimmed.contains("://") {
+            guard let url = URL(string: trimmed), Self.isHTTPS(url) else {
+                return .failed(message: "Update feed URLs must use HTTPS.")
             }
             endpointURL = url
-            isGitHubAPI = trimmed.contains("api.github.com/repos/")
+            isGitHubAPI = url.host == "api.github.com"
         } else {
             let slug = trimmed
                 .replacingOccurrences(of: "https://github.com/", with: "")
@@ -172,11 +184,11 @@ public struct UpdateService: Sendable {
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
+            let (data, response) = try await URLSession.shared.data(for: request, delegate: HTTPSOnlyRedirects())
+            guard let http = response as? HTTPURLResponse, http.url.map(Self.isHTTPS) == true else {
                 return .failed(message: "Unexpected response from update server.")
             }
-            if http.statusCode == 404 {
+            if isGitHubAPI && http.statusCode == 404 {
                 return .upToDate(currentVersion: currentVersion, checkedAt: Date())
             }
             guard (200..<300).contains(http.statusCode) else {
@@ -192,78 +204,101 @@ public struct UpdateService: Sendable {
 
     // MARK: - In-App Self-Update (Download, Extract, Verify, Atomic Swap & Relaunch)
 
-    /// Downloads the release `.zip` archive directly in-process (no browser quarantine),
-    /// verifies optional SHA-256 + `codesign`, and returns the staged `Husk.app` URL ready for atomic replacement.
+    /// Authenticates the archive before extraction, then verifies the bundle before it can replace the app.
     public func downloadAndStageUpdate(
         release: AppReleaseInfo,
         onPhaseChange: @Sendable (UpdateInstallPhase) -> Void
     ) async throws -> (stagedAppURL: URL, stagingRootURL: URL) {
+        guard release.canInstallInApp, let signatureURL = release.signatureURL else {
+            throw Self.updateError("An HTTPS ZIP and a Husk release signature are required.")
+        }
+
         let fm = FileManager.default
         let stagingRoot = fm.temporaryDirectory
             .appendingPathComponent("husk-update-\(UUID().uuidString)", isDirectory: true)
-            .standardizedFileURL
-        try fm.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+        try fm.createDirectory(at: stagingRoot, withIntermediateDirectories: false,
+                               attributes: [.posixPermissions: 0o700])
+        var staged = false
+        defer {
+            if !staged { try? fm.removeItem(at: stagingRoot) }
+        }
 
         onPhaseChange(.downloading)
-        var request = URLRequest(url: release.downloadURL)
-        request.timeoutInterval = 120.0
-        request.setValue("Husk/\(Self.currentAppVersion) (macOS)", forHTTPHeaderField: "User-Agent")
-
-        let (tempDownloadedURL, response) = try await URLSession.shared.download(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(
-                domain: "HuskSelfUpdateError",
-                code: code,
-                userInfo: [NSLocalizedDescriptionKey: "Download failed with HTTP \(code)."]
-            )
-        }
-
         let archiveURL = stagingRoot.appendingPathComponent("Husk-update.zip")
-        try? fm.removeItem(at: archiveURL)
-        try fm.moveItem(at: tempDownloadedURL, to: archiveURL)
+        let signatureFile = stagingRoot.appendingPathComponent("Husk-update.zip.sig")
+        try await Self.download(from: release.downloadURL, to: archiveURL)
+        try await Self.download(from: signatureURL, to: signatureFile)
 
-        // Optional SHA-256 verification if provided by manifest
-        if let expectedHash = release.sha256?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-           !expectedHash.isEmpty {
-            let actualHash = try Self.sha256Hex(of: archiveURL)
-            guard actualHash == expectedHash else {
-                try? fm.removeItem(at: stagingRoot)
-                throw NSError(
-                    domain: "HuskSelfUpdateError",
-                    code: 10,
-                    userInfo: [NSLocalizedDescriptionKey: "SHA-256 checksum mismatch for downloaded archive."]
-                )
-            }
+        onPhaseChange(.verifying)
+        let archive = try Data(contentsOf: archiveURL, options: .mappedIfSafe)
+        let signatureSize = try signatureFile.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard signatureSize > 0, signatureSize <= 128 else {
+            throw Self.updateError("Invalid Husk release signature.")
         }
 
-        // Extract .zip using macOS ditto (preserves bundle structure & code signature)
+        let signature = try String(contentsOf: signatureFile, encoding: .utf8)
+        try Self.verifyArchiveSignature(archive, signature: signature)
+        if let sha256 = release.sha256, !sha256.isEmpty, Self.sha256Hex(of: archive) != sha256.lowercased() {
+            throw Self.updateError("SHA-256 checksum mismatch for downloaded archive.")
+        }
+
         onPhaseChange(.extracting)
         let extractedDir = stagingRoot.appendingPathComponent("extracted", isDirectory: true)
-        try fm.createDirectory(at: extractedDir, withIntermediateDirectories: true)
-        try Self.runHelperProcess(executable: "/usr/bin/ditto", arguments: ["-x", "-k", archiveURL.path, extractedDir.path])
+        try fm.createDirectory(at: extractedDir, withIntermediateDirectories: false)
+        try CommandRunner.run("/usr/bin/ditto", arguments: ["-x", "-k", archiveURL.path, extractedDir.path], timeout: 60)
 
-        let stagedAppURL = extractedDir.appendingPathComponent("Husk.app", isDirectory: true).standardizedFileURL
+        let stagedAppURL = extractedDir.appendingPathComponent("Husk.app", isDirectory: true)
         let executableURL = stagedAppURL.appendingPathComponent("Contents/MacOS/Husk")
-        guard fm.fileExists(atPath: stagedAppURL.path), fm.isExecutableFile(atPath: executableURL.path) else {
-            try? fm.removeItem(at: stagingRoot)
-            throw NSError(
-                domain: "HuskSelfUpdateError",
-                code: 11,
-                userInfo: [NSLocalizedDescriptionKey: "Release archive did not contain a valid Husk.app bundle."]
-            )
+        guard SafetyInspector.pathComponentError(for: executableURL) == nil,
+              fm.isExecutableFile(atPath: executableURL.path),
+              let bundle = Bundle(url: stagedAppURL), bundle.bundleIdentifier == "com.stabil.husk",
+              let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              let bundleVersion = SemanticVersion(string: version),
+              bundleVersion == release.semanticVersion,
+              let currentVersion = SemanticVersion(string: Self.currentAppVersion),
+              bundleVersion > currentVersion else {
+            throw Self.updateError("The signed archive did not contain the expected newer Husk release.")
         }
 
-        // Verify signature and clear any extended quarantine attributes
         onPhaseChange(.verifying)
-        _ = try? Self.runHelperProcess(executable: "/usr/bin/xattr", arguments: ["-cr", stagedAppURL.path])
-        try Self.runHelperProcess(executable: "/usr/bin/codesign", arguments: ["--verify", "--deep", "--strict", stagedAppURL.path])
-
+        try CommandRunner.run("/usr/bin/codesign",
+                              arguments: ["--verify", "--deep", "--strict", stagedAppURL.path], timeout: 30)
+        staged = true
         return (stagedAppURL, stagingRoot)
     }
 
+    static func verifyArchiveSignature(_ archive: Data, signature: String,
+                                       publicKey: String = releaseSigningPublicKey) throws {
+        guard let keyBytes = Data(base64Encoded: publicKey),
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyBytes),
+              let signatureBytes = Data(base64Encoded: signature.trimmingCharacters(in: .whitespacesAndNewlines)),
+              key.isValidSignature(signatureBytes, for: archive) else {
+            throw updateError("The archive does not have a valid Husk release signature.")
+        }
+    }
+
+    static func isHTTPS(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https" && url.host != nil && url.user == nil && url.password == nil
+    }
+
+    private static func download(from url: URL, to destination: URL) async throws {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 120
+        request.setValue("Husk/\(currentAppVersion) (macOS)", forHTTPHeaderField: "User-Agent")
+        let (temporaryFile, response) = try await URLSession.shared.download(for: request, delegate: HTTPSOnlyRedirects())
+        guard let http = response as? HTTPURLResponse, http.url.map(isHTTPS) == true,
+              (200..<300).contains(http.statusCode) else {
+            throw updateError("Could not download the update over HTTPS.")
+        }
+        try FileManager.default.moveItem(at: temporaryFile, to: destination)
+    }
+
+    private static func updateError(_ message: String) -> NSError {
+        NSError(domain: "HuskSelfUpdateError", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
     /// Spawns a detached helper script that waits for `currentPID` to terminate,
-    /// atomically swaps `targetAppBundleURL` with `stagedAppURL` (with rollback on error),
+    /// replaces `targetAppBundleURL` with `stagedAppURL` (with rollback on error),
     /// clears quarantine, and relaunches the new `Husk.app`.
     public func launchSelfReplaceAndRelaunch(
         stagedAppURL: URL,
@@ -271,6 +306,10 @@ public struct UpdateService: Sendable {
         targetAppBundleURL: URL,
         currentPID: Int32 = ProcessInfo.processInfo.processIdentifier
     ) throws {
+        guard FileManager.default.isWritableFile(atPath: targetAppBundleURL.deletingLastPathComponent().path) else {
+            try? FileManager.default.removeItem(at: stagingRootURL)
+            throw Self.updateError("Move Husk to a writable Applications folder before installing updates.")
+        }
         let scriptURL = stagingRootURL.appendingPathComponent("apply-update.sh")
         let script = """
         #!/bin/zsh
@@ -281,6 +320,13 @@ public struct UpdateService: Sendable {
         TARGET="\(Self.escapeForDoubleQuotes(targetAppBundleURL.path))"
         STAGING_ROOT="\(Self.escapeForDoubleQuotes(stagingRootURL.path))"
         BACKUP="${TARGET}.previous.$$"
+        INCOMING="${TARGET}.incoming.$$"
+        [[ ! -e "$INCOMING" && ! -L "$INCOMING" && ! -e "$BACKUP" && ! -L "$BACKUP" ]]
+        trap 'rm -rf "$STAGING_ROOT" "$INCOMING"' EXIT
+
+        # Stage on the install volume before moving the original bundle.
+        mv "$STAGED" "$INCOMING"
+        /usr/bin/codesign --verify --deep --strict "$INCOMING"
 
         # Wait up to 10 seconds for the old Husk process to exit cleanly
         for i in {1..100}; do
@@ -290,24 +336,31 @@ public struct UpdateService: Sendable {
           sleep 0.1
         done
 
-        # Atomic swap with rollback protection
-        mkdir -p "$(dirname "$TARGET")"
+        if kill -0 "$OLD_PID" 2>/dev/null; then
+          exit 1
+        fi
+
+        # Replace with rollback protection
         if [[ -e "$TARGET" ]]; then
           mv "$TARGET" "$BACKUP"
         fi
 
-        if mv "$STAGED" "$TARGET"; then
-          rm -rf "$BACKUP"
-          /usr/bin/xattr -cr "$TARGET" 2>/dev/null || true
-          /usr/bin/open -n "$TARGET"
+        if mv "$INCOMING" "$TARGET"; then
+          /usr/bin/xattr -d com.apple.quarantine "$TARGET" 2>/dev/null || true
+          if /usr/bin/open -n "$TARGET"; then
+            rm -rf "$BACKUP"
+          elif [[ -e "$BACKUP" ]]; then
+            rm -rf "$TARGET"
+            mv "$BACKUP" "$TARGET"
+            /usr/bin/open -n "$TARGET"
+          fi
         else
           # Roll back if swap failed
           if [[ -e "$BACKUP" ]]; then
             mv "$BACKUP" "$TARGET"
+            /usr/bin/open -n "$TARGET"
           fi
         fi
-
-        rm -rf "$STAGING_ROOT"
         """
 
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -330,7 +383,10 @@ public struct UpdateService: Sendable {
     }
 
     public static func sha256Hex(of fileURL: URL) throws -> String {
-        let data = try Data(contentsOf: fileURL)
+        try sha256Hex(of: Data(contentsOf: fileURL, options: .mappedIfSafe))
+    }
+
+    private static func sha256Hex(of data: Data) -> String {
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -341,24 +397,6 @@ public struct UpdateService: Sendable {
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "$", with: "\\$")
             .replacingOccurrences(of: "`", with: "\\`")
-    }
-
-    private static func runHelperProcess(executable: String, arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let errPipe = Pipe()
-        process.standardOutput = Pipe()
-        process.standardError = errPipe
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let errStr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? "Command failed with exit code \(process.terminationStatus)"
-            throw NSError(domain: "HuskSelfUpdateError", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errStr])
-        }
     }
 
     // MARK: - Manifest Parsing & Version Comparison
@@ -374,21 +412,13 @@ public struct UpdateService: Sendable {
             let body = (json["body"] as? String) ?? ""
             let publishedAt = json["published_at"] as? String
 
-            var downloadURL: URL? = nil
-            if let assets = json["assets"] as? [[String: Any]] {
-                // Prefer .zip for direct in-app ditto extraction, fallback to .dmg
-                let zipAsset = assets.first {
-                    (($0["name"] as? String) ?? "").lowercased().hasSuffix(".zip")
-                }
-                let dmgAsset = assets.first {
-                    (($0["name"] as? String) ?? "").lowercased().hasSuffix(".dmg")
-                }
-                if let chosen = zipAsset ?? dmgAsset ?? assets.first,
-                   let urlString = chosen["browser_download_url"] as? String {
-                    downloadURL = URL(string: urlString)
-                }
+            let assets = json["assets"] as? [[String: Any]] ?? []
+            let chosen = assets.first { (($0["name"] as? String) ?? "").lowercased().hasSuffix(".zip") }
+            let downloadURL = (chosen?["browser_download_url"] as? String).flatMap(URL.init(string:))
+            let signatureURL = (chosen?["name"] as? String).flatMap { zipName in
+                let signature = assets.first { ($0["name"] as? String) == zipName + ".sig" }
+                return (signature?["browser_download_url"] as? String).flatMap(URL.init(string:))
             }
-
             let finalDownload = downloadURL ?? htmlURL ?? fallbackURL
             return AppReleaseInfo(
                 version: tagName,
@@ -396,7 +426,8 @@ public struct UpdateService: Sendable {
                 releasePageURL: htmlURL,
                 releaseNotes: body,
                 publishedAt: publishedAt,
-                sha256: nil
+                sha256: nil,
+                signatureURL: signatureURL
             )
         }
 
@@ -405,7 +436,7 @@ public struct UpdateService: Sendable {
             let urlStr = (json["downloadURL"] as? String)
                 ?? (json["download_url"] as? String)
                 ?? (json["url"] as? String)
-            let downloadURL = urlStr.flatMap(URL.init(string:)) ?? fallbackURL
+            let downloadURL = urlStr.flatMap { URL(string: $0, relativeTo: fallbackURL)?.absoluteURL } ?? fallbackURL
             let pageStr = (json["releasePageURL"] as? String) ?? (json["release_page_url"] as? String)
             let releasePageURL = pageStr.flatMap(URL.init(string:))
             let notes = (json["releaseNotes"] as? String)
@@ -414,6 +445,8 @@ public struct UpdateService: Sendable {
                 ?? ""
             let publishedAt = (json["publishedAt"] as? String) ?? (json["published_at"] as? String)
             let sha256 = json["sha256"] as? String
+            let signatureURL = ((json["signatureURL"] as? String) ?? (json["signature_url"] as? String))
+                .flatMap { URL(string: $0, relativeTo: fallbackURL)?.absoluteURL }
 
             return AppReleaseInfo(
                 version: version,
@@ -421,7 +454,8 @@ public struct UpdateService: Sendable {
                 releasePageURL: releasePageURL,
                 releaseNotes: notes,
                 publishedAt: publishedAt,
-                sha256: sha256
+                sha256: sha256,
+                signatureURL: signatureURL
             )
         }
 
@@ -437,5 +471,14 @@ public struct UpdateService: Sendable {
             return .updateAvailable(release: release, currentVersion: currentSemver.description)
         }
         return .upToDate(currentVersion: currentSemver.description, checkedAt: Date())
+    }
+}
+
+
+private final class HTTPSOnlyRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(request.url.map(UpdateService.isHTTPS) == true ? request : nil)
     }
 }

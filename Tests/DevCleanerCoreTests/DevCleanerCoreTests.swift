@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import DevCleanerCore
@@ -269,6 +270,8 @@ struct DevCleanerCoreTests {
         )
         #expect(liveSession.wasDryRun == false)
         #expect(liveSession.restorableItemCount == 1)
+        #expect(liveSession.totalBytesReclaimed == 0)
+        #expect(liveSession.totalBytesMovedToTrash > 0)
         #expect(FileManager.default.fileExists(atPath: nodeModules.path) == false)
 
         let trashedPath = try #require(liveSession.items.first?.trashedPath)
@@ -373,6 +376,10 @@ struct DevCleanerCoreTests {
               "browser_download_url": "https://github.com/stabil/husk/releases/download/v1.2.0/Husk-1.2.0-macos-arm64.zip"
             },
             {
+              "name": "Husk-1.2.0-macos-arm64.zip.sig",
+              "browser_download_url": "https://github.com/stabil/husk/releases/download/v1.2.0/Husk-1.2.0-macos-arm64.zip.sig"
+            },
+            {
               "name": "Husk-1.2.0-macos-arm64.dmg",
               "browser_download_url": "https://github.com/stabil/husk/releases/download/v1.2.0/Husk-1.2.0-macos-arm64.dmg"
             }
@@ -383,6 +390,7 @@ struct DevCleanerCoreTests {
         let ghRelease = try UpdateService.parseReleasePayload(data: githubJSON, fallbackURL: fallbackURL)
         #expect(ghRelease.version == "v1.2.0")
         #expect(ghRelease.downloadURL.absoluteString.hasSuffix(".zip"))
+        #expect(ghRelease.canInstallInApp)
         let ghStatus = UpdateService.compare(release: ghRelease, againstCurrentVersion: "1.0.0")
         if case .updateAvailable(let rel, let current) = ghStatus {
             #expect(rel.version == "v1.2.0")
@@ -403,6 +411,7 @@ struct DevCleanerCoreTests {
 
         let webRelease = try UpdateService.parseReleasePayload(data: websiteJSON, fallbackURL: fallbackURL)
         #expect(webRelease.sha256 == "abc123def456")
+        #expect(!webRelease.canInstallInApp)
         let webStatus = UpdateService.compare(release: webRelease, againstCurrentVersion: "1.0.0")
         if case .upToDate(let current, _) = webStatus {
             #expect(current == "1.0.0")
@@ -436,6 +445,7 @@ struct DevCleanerCoreTests {
         try runGit(["config", "user.name", "Husk Test"], in: mainRepo)
         try runGit(["config", "user.email", "test@husk.app"], in: mainRepo)
         try writeDummyFile(at: mainRepo.appendingPathComponent("README.md"), content: "# Core App\n")
+        try writeDummyFile(at: mainRepo.appendingPathComponent(".gitignore"), content: ".env\n")
         try runGit(["add", "."], in: mainRepo)
         try runGit(["commit", "-m", "initial commit"], in: mainRepo)
 
@@ -447,6 +457,7 @@ struct DevCleanerCoreTests {
         let now = Date()
         let oldDate = now.addingTimeInterval(-20 * 86_400)
         try setModificationDate(oldDate, for: mergedWT.appendingPathComponent("README.md"))
+        try setModificationDate(oldDate, for: mergedWT.appendingPathComponent(".gitignore"))
         try setModificationDate(oldDate, for: mergedWT.appendingPathComponent(".git"))
         try setModificationDate(oldDate, for: mergedWT)
 
@@ -477,6 +488,7 @@ struct DevCleanerCoreTests {
         #expect(mergedItem.protection.hasUncommittedChanges == false)
         #expect(mergedItem.protection.isShielded == false)
         #expect(mergedItem.effectiveSafetyTier == .safeRebuildable)
+        #expect(!mergedItem.isEligibleForSafeSweep())
         #expect(mergedItem.worktree?.statusBadgeText == "Merged")
 
         let dirtyItem = try #require(worktrees.first { $0.path.lastPathComponent == "wt-dirty" })
@@ -495,15 +507,130 @@ struct DevCleanerCoreTests {
             customTrashDirectory: box.trashRoot
         )
 
+        let unconfirmed = try executor.execute(
+            items: [mergedItem],
+            mode: .moveToTrash,
+            allowedWorkspaceRoots: [box.workspaceRoot]
+        )
+        #expect(unconfirmed.items.first?.errorDescription != nil)
+        #expect(FileManager.default.fileExists(atPath: mergedWT.path))
+
+        let ignoredFile = mergedWT.appendingPathComponent(".env")
+        try writeDummyFile(at: ignoredFile, content: "LOCAL_TEST_DATA=1")
+        let protected = try executor.execute(
+            items: [mergedItem],
+            mode: .moveToTrash,
+            allowedWorkspaceRoots: [box.workspaceRoot],
+            allowIrreversibleToolTasks: true
+        )
+        #expect(protected.items.first?.errorDescription != nil)
+        #expect(FileManager.default.fileExists(atPath: ignoredFile.path))
+        try FileManager.default.removeItem(at: ignoredFile)
+
         let session = try executor.execute(
             items: [mergedItem],
             mode: .moveToTrash,
-            dryRun: false,
-            allowedWorkspaceRoots: [box.workspaceRoot]
+            allowedWorkspaceRoots: [box.workspaceRoot],
+            allowIrreversibleToolTasks: true
         )
         #expect(session.items.first?.errorDescription == nil)
+        #expect(session.restorableItemCount == 0)
         #expect(FileManager.default.fileExists(atPath: mergedWT.path) == false)
         #expect(FileManager.default.fileExists(atPath: dirtyWT.path) == true)
+    }
+
+    @Test("Cleanup refuses a replaced folder and any symlink in its parents")
+    func rejectsChangedCleanupPaths() async throws {
+        let box = try TestSandbox()
+        defer { box.cleanup() }
+        let fm = FileManager.default
+        let project = box.workspaceRoot.appendingPathComponent("app")
+        let artifact = project.appendingPathComponent("node_modules")
+        try writeDummyFile(at: project.appendingPathComponent("package.json"), content: "{}")
+        try writeDummyFile(at: artifact.appendingPathComponent("test.js"))
+        let items = await APFSBlockScanner().scan(configuration: ScanConfiguration(
+            workspaceRoots: [box.workspaceRoot], homeDirectory: box.fakeHomeRoot, includeGlobalCaches: false
+        ))
+        let item = try #require(items.first)
+        let executor = CleanupExecutor(safetyInspector: SafetyInspector(homeDirectory: box.fakeHomeRoot),
+                                       auditStore: AuditLogStore(storageDirectory: box.auditRoot),
+                                       customTrashDirectory: box.trashRoot)
+
+        let savedArtifact = project.appendingPathComponent("previous-artifact")
+        try fm.moveItem(at: artifact, to: savedArtifact)
+        try writeDummyFile(at: artifact.appendingPathComponent("keep.js"))
+        let changed = try executor.execute(items: [item], mode: .permanentDelete,
+                                          allowedWorkspaceRoots: [box.workspaceRoot])
+        #expect(changed.items.first?.errorDescription != nil)
+        #expect(fm.fileExists(atPath: artifact.appendingPathComponent("keep.js").path))
+
+        let renamedProject = box.workspaceRoot.appendingPathComponent("other-project")
+        try fm.moveItem(at: project, to: renamedProject)
+        try fm.createSymbolicLink(at: project, withDestinationURL: renamedProject)
+        #expect(throws: SafetyValidationError.symbolicLinkRejected(artifact.path)) {
+            try executor.safetyInspector.validateDeletionTarget(artifact, allowedWorkspaceRoots: [box.workspaceRoot]).get()
+        }
+    }
+
+    @Test("Tool commands with no storage changes report zero and output cannot block the runner")
+    func toolCommandOutputAndAccounting() throws {
+        let box = try TestSandbox()
+        defer { box.cleanup() }
+        let cache = box.workspaceRoot.appendingPathComponent("cache")
+        try writeDummyFile(at: cache.appendingPathComponent("data.bin"), sizeBytes: 32_768)
+        let item = CleanupItem(ruleId: "test.tool", title: "Test", projectName: "Test", path: cache,
+                               category: .projectArtifacts, ecosystem: .git, baseSafetyTier: .safeRebuildable,
+                               allocatedSizeBytes: 32_768, fileCount: 1, lastModified: .distantPast,
+                               protection: .init(isGitRepo: false, hasUncommittedChanges: false,
+                                                 daysSinceLastActivity: 40, hasActiveProcess: false,
+                                                 activeShieldWindowDays: 7),
+                               regenerateHint: "", actionKind: .toolCommand(
+                                   executable: "/bin/sh",
+                                   arguments: ["-c", "dd if=/dev/zero bs=1024 count=256; dd if=/dev/zero bs=1024 count=256 >&2"],
+                                   displayCommand: "Test output"
+                               ))
+        let executor = CleanupExecutor(safetyInspector: SafetyInspector(homeDirectory: box.fakeHomeRoot),
+                                       auditStore: AuditLogStore(storageDirectory: box.auditRoot))
+        let session = try executor.execute(items: [item], mode: .moveToTrash, allowedWorkspaceRoots: [box.workspaceRoot],
+                                           allowIrreversibleToolTasks: true)
+        #expect(session.items.first?.errorDescription == nil)
+        #expect(session.items.first?.sizeBytes == 0)
+        #expect(session.totalBytesReclaimed == 0)
+        #expect(throws: (any Error).self) {
+            try CommandRunner.run("/bin/sleep", arguments: ["10"], timeout: 0.1)
+        }
+    }
+
+    @Test("In-app updates require HTTPS and a signature from the trusted signing key")
+    func verifiesReleaseAuthenticity() async throws {
+        let archive = Data("test archive".utf8)
+        let signer = Curve25519.Signing.PrivateKey()
+        let signature = try signer.signature(for: archive).base64EncodedString()
+        let trustedKey = signer.publicKey.rawRepresentation.base64EncodedString()
+        try UpdateService.verifyArchiveSignature(archive, signature: signature, publicKey: trustedKey)
+        #expect(throws: (any Error).self) {
+            try UpdateService.verifyArchiveSignature(archive, signature: signature)
+        }
+        #expect(throws: (any Error).self) {
+            try UpdateService.verifyArchiveSignature(archive + Data([0]), signature: signature, publicKey: trustedKey)
+        }
+        let httpFeed = await UpdateService().checkForUpdates(source: "http://example.invalid/latest.json")
+        #expect(httpFeed == .failed(message: "Update feed URLs must use HTTPS."))
+    }
+
+    @Test("The bundled changelog presents upgrades in order and shows them only once per version")
+    func changelogVersionSelection() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let content = try String(contentsOf: repository.appendingPathComponent("CHANGELOG.md"), encoding: .utf8)
+        let releases = ChangelogRelease.parse(content)
+        let current = try #require(SemanticVersion(string: "1.0.5"))
+        let previous = try #require(SemanticVersion(string: "1.0.2"))
+        #expect(releases.map(\.id).suffix(6) == ["1.0.5", "1.0.4", "1.0.3", "1.0.2", "1.0.1", "1.0.0"])
+        #expect(ChangelogRelease.whatsNew(in: releases, current: current, previous: previous).map(\.id)
+                == ["1.0.5", "1.0.4", "1.0.3"])
+        #expect(ChangelogRelease.whatsNew(in: releases, current: current, previous: nil).map(\.id) == ["1.0.5"])
+        #expect(ChangelogRelease.whatsNew(in: releases, current: current, previous: current).isEmpty)
     }
 
     // MARK: - Helpers

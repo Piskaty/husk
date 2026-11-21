@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct CleanupExecutor: Sendable {
@@ -23,123 +24,68 @@ public struct CleanupExecutor: Sendable {
         items: [CleanupItem],
         mode: DeletionMode,
         dryRun: Bool = false,
-        allowedWorkspaceRoots: [URL]
+        allowedWorkspaceRoots: [URL],
+        allowIrreversibleToolTasks: Bool = false
     ) throws -> CleanupSessionRecord {
         let fm = FileManager.default
         var records: [CleanedItemRecord] = []
         var totalReclaimed: Int64 = 0
 
         for item in items {
-            switch safetyInspector.validateDeletionItem(item, allowedWorkspaceRoots: allowedWorkspaceRoots) {
-            case .failure(let safetyError):
-                records.append(
-                    CleanedItemRecord(
-                        title: item.title,
-                        projectName: item.projectName,
-                        category: item.category,
-                        ecosystem: item.ecosystem,
-                        originalPath: item.path.path,
-                        trashedPath: nil,
-                        sizeBytes: 0,
-                        isRestored: false,
-                        errorDescription: safetyError.localizedDescription,
-                        rebuildCommand: item.rebuildCommand
-                    )
+            func record(size: Int64, trashedPath: String? = nil, error: Error? = nil) -> CleanedItemRecord {
+                CleanedItemRecord(
+                    title: item.title,
+                    projectName: item.projectName,
+                    category: item.category,
+                    ecosystem: item.ecosystem,
+                    originalPath: item.path.path,
+                    trashedPath: trashedPath,
+                    sizeBytes: size,
+                    isRestored: false,
+                    errorDescription: error?.localizedDescription,
+                    rebuildCommand: item.rebuildCommand,
+                    wasToolCommand: item.actionKind.isToolCommand
                 )
-                continue
-            case .success:
-                break
-            }
-
-            if dryRun {
-                records.append(
-                    CleanedItemRecord(
-                        title: item.title,
-                        projectName: item.projectName,
-                        category: item.category,
-                        ecosystem: item.ecosystem,
-                        originalPath: item.path.path,
-                        trashedPath: nil,
-                        sizeBytes: item.allocatedSizeBytes,
-                        isRestored: false,
-                        errorDescription: nil,
-                        rebuildCommand: item.rebuildCommand
-                    )
-                )
-                totalReclaimed += item.allocatedSizeBytes
-                continue
             }
 
             do {
+                try validateCurrentTarget(item, allowedWorkspaceRoots: allowedWorkspaceRoots, checkWorktree: dryRun)
+                if dryRun {
+                    records.append(record(size: item.allocatedSizeBytes))
+                    totalReclaimed += item.allocatedSizeBytes
+                    continue
+                }
+
                 switch item.actionKind {
                 case .toolCommand(let executable, let arguments, _):
-                    let bytesBefore = item.allocatedSizeBytes
-                    try runToolSubcommand(executable: executable, arguments: arguments)
-                    let bytesAfter = APFSBlockScanner.measureDirectory(at: item.path).allocatedBytes
-                    let saved = max(0, bytesBefore - bytesAfter)
-                    let effectiveReclaimed = saved > 0 ? saved : bytesBefore
-
-                    totalReclaimed += effectiveReclaimed
-                    records.append(
-                        CleanedItemRecord(
-                            title: item.title,
-                            projectName: item.projectName,
-                            category: item.category,
-                            ecosystem: item.ecosystem,
-                            originalPath: item.path.path,
-                            trashedPath: nil,
-                            sizeBytes: effectiveReclaimed,
-                            isRestored: false,
-                            errorDescription: nil,
-                            rebuildCommand: item.rebuildCommand
-                        )
-                    )
+                    guard allowIrreversibleToolTasks else { throw Failure.unconfirmedToolTask }
+                    let measuredPath = measurementPath(for: item)
+                    let before = APFSBlockScanner.measureDirectory(at: measuredPath).allocatedBytes
+                    let volumeProbe = measuredPath.deletingLastPathComponent()
+                    let freeBefore = availableBytes(at: volumeProbe)
+                    try validateCurrentTarget(item, allowedWorkspaceRoots: allowedWorkspaceRoots)
+                    try CommandRunner.run(executable, arguments: arguments, timeout: 120)
+                    let after = APFSBlockScanner.measureDirectory(at: measuredPath).allocatedBytes
+                    let removed = max(0, before - after)
+                    totalReclaimed += freeSpaceGain(before: freeBefore, at: volumeProbe, upTo: removed)
+                    records.append(record(size: removed))
 
                 case .filesystem:
-                    guard fm.fileExists(atPath: item.path.path) else {
-                        continue
-                    }
-
-                    var trashedPath: String? = nil
+                    let volumeProbe = item.path.deletingLastPathComponent()
+                    let freeBefore = availableBytes(at: volumeProbe)
+                    try validateCurrentTarget(item, allowedWorkspaceRoots: allowedWorkspaceRoots)
                     switch mode {
                     case .moveToTrash:
-                        let destinationURL = try moveItemToTrash(at: item.path)
-                        trashedPath = destinationURL.path
+                        let destination = try moveItemToTrash(at: item.path)
+                        records.append(record(size: item.allocatedSizeBytes, trashedPath: destination?.path))
                     case .permanentDelete:
                         try fm.removeItem(at: item.path)
+                        totalReclaimed += freeSpaceGain(before: freeBefore, at: volumeProbe, upTo: item.allocatedSizeBytes)
+                        records.append(record(size: item.allocatedSizeBytes))
                     }
-
-                    totalReclaimed += item.allocatedSizeBytes
-                    records.append(
-                        CleanedItemRecord(
-                            title: item.title,
-                            projectName: item.projectName,
-                            category: item.category,
-                            ecosystem: item.ecosystem,
-                            originalPath: item.path.path,
-                            trashedPath: trashedPath,
-                            sizeBytes: item.allocatedSizeBytes,
-                            isRestored: false,
-                            errorDescription: nil,
-                            rebuildCommand: item.rebuildCommand
-                        )
-                    )
                 }
             } catch {
-                records.append(
-                    CleanedItemRecord(
-                        title: item.title,
-                        projectName: item.projectName,
-                        category: item.category,
-                        ecosystem: item.ecosystem,
-                        originalPath: item.path.path,
-                        trashedPath: nil,
-                        sizeBytes: 0,
-                        isRestored: false,
-                        errorDescription: error.localizedDescription,
-                        rebuildCommand: item.rebuildCommand
-                    )
-                )
+                records.append(record(size: 0, error: error))
             }
         }
 
@@ -147,10 +93,71 @@ public struct CleanupExecutor: Sendable {
             mode: mode,
             wasDryRun: dryRun,
             totalBytesReclaimed: totalReclaimed,
-            items: records
+            items: records,
+            usesObservedFreeSpace: true
         )
         try auditStore.recordSession(session)
         return session
+    }
+
+    private func validateCurrentTarget(_ item: CleanupItem, allowedWorkspaceRoots: [URL], checkWorktree: Bool = true) throws {
+        try safetyInspector.validateDeletionItem(item, allowedWorkspaceRoots: allowedWorkspaceRoots).get()
+        let currentIdentity = CleanupTargetIdentity.read(at: item.path)
+
+        if item.worktree?.isPrunable == true {
+            guard item.targetIdentity == nil, currentIdentity == nil,
+                  !FileManager.default.fileExists(atPath: item.path.path) else {
+                throw SafetyValidationError.targetChanged(item.path.path)
+            }
+            return
+        }
+
+        guard let currentIdentity, currentIdentity == item.targetIdentity else {
+            throw SafetyValidationError.targetChanged(item.path.path)
+        }
+
+        if checkWorktree, let worktree = item.worktree {
+            let mainRepo = URL(fileURLWithPath: worktree.mainRepoPath, isDirectory: true)
+            guard GitWorktreeInspector.canRemove(item.path, from: mainRepo) else {
+                throw Failure.unsafeWorktree
+            }
+            try safetyInspector.validateDeletionItem(item, allowedWorkspaceRoots: allowedWorkspaceRoots).get()
+            guard CleanupTargetIdentity.read(at: item.path) == currentIdentity else {
+                throw SafetyValidationError.targetChanged(item.path.path)
+            }
+        }
+    }
+
+    private func measurementPath(for item: CleanupItem) -> URL {
+        if let worktree = item.worktree, worktree.isPrunable {
+            return URL(fileURLWithPath: worktree.mainRepoPath).appendingPathComponent(".git/worktrees")
+        }
+        return item.path
+    }
+
+    private func availableBytes(at url: URL) -> Int64? {
+        var info = statfs()
+        guard statfs(url.path, &info) == 0 else { return nil }
+        return Int64(clamping: info.f_bavail * UInt64(info.f_bsize))
+    }
+
+    private func freeSpaceGain(before: Int64?, at url: URL, upTo removed: Int64) -> Int64 {
+        guard removed > 0, let before, let after = availableBytes(at: url) else { return 0 }
+        return min(removed, max(0, after - before))
+    }
+
+    private enum Failure: LocalizedError {
+        case unconfirmedToolTask
+        case unsafeWorktree
+
+        var errorDescription: String? {
+            switch self {
+            case .unconfirmedToolTask:
+                return "Running irreversible tool tasks requires explicit confirmation."
+            case .unsafeWorktree:
+                return "The worktree must be merged, unlocked, and free of modified, untracked, or ignored files."
+            }
+        }
     }
 
     @discardableResult
@@ -171,6 +178,10 @@ public struct CleanupExecutor: Sendable {
                 continue
             }
 
+            if let error = SafetyInspector.pathComponentError(for: originalURL)
+                ?? SafetyInspector.pathComponentError(for: trashedURL) {
+                throw error
+            }
             let parentDir = originalURL.deletingLastPathComponent()
             try fm.createDirectory(at: parentDir, withIntermediateDirectories: true)
             try fm.moveItem(at: trashedURL, to: originalURL)
@@ -181,25 +192,7 @@ public struct CleanupExecutor: Sendable {
         return updatedSession
     }
 
-    private func runToolSubcommand(executable: String, arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let errPipe = Pipe()
-        process.standardOutput = Pipe()
-        process.standardError = errPipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let errMsg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Command exited with status \(process.terminationStatus)"
-            throw NSError(domain: "HuskToolCommandError", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errMsg])
-        }
-    }
-
-    private func moveItemToTrash(at sourceURL: URL) throws -> URL {
+    private func moveItemToTrash(at sourceURL: URL) throws -> URL? {
         let fm = FileManager.default
         if let customTrashDirectory {
             try fm.createDirectory(at: customTrashDirectory, withIntermediateDirectories: true)
@@ -224,6 +217,6 @@ public struct CleanupExecutor: Sendable {
             return destURL
         }
 
-        return sourceURL
+        return nil
     }
 }

@@ -68,7 +68,7 @@ public struct AuditHistoryView: View {
                 Text("·")
                     .foregroundStyle(.tertiary)
 
-                Text("\(session.items.count) items · \(session.formattedTotalReclaimed)")
+                Text("\(session.items.count) items · \(session.storageSummary)")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -100,6 +100,7 @@ public struct AuditHistoryView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .disabled(viewModel.isCleaning)
                 }
             }
 
@@ -127,9 +128,12 @@ public struct AuditHistoryView: View {
 
                         Spacer()
 
-                        Text(record.isRestored ? "Restored" : (record.canRestore ? "In Trash" : "Cleaned"))
+                        Text(record.errorDescription ?? (record.isRestored ? "Restored"
+                             : (record.canRestore ? "In Trash" : (session.wasDryRun ? "Simulated" : "Processed"))))
                             .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(record.errorDescription == nil ? Color.secondary : .orange)
+                            .lineLimit(2)
+                            .help(record.errorDescription ?? "")
 
                         Text(ByteFormatting.string(from: record.sizeBytes))
                             .font(.system(size: 12))

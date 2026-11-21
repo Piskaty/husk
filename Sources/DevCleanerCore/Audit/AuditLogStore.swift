@@ -62,7 +62,7 @@ public struct AuditLogStore: Sendable {
         lines.append("- **Timestamp**: \(formatter.string(from: session.timestamp))")
         lines.append("- **Mode**: \(session.mode.title)")
         lines.append("- **Dry-Run Only**: \(session.wasDryRun ? "Yes" : "No")")
-        lines.append("- **Total Space Reclaimed**: \(session.formattedTotalReclaimed)")
+        lines.append("- **Storage**: \(session.storageSummary)")
         lines.append("")
         lines.append("## Items Processed (\(session.items.count))")
         lines.append("| Project | Artifact | Size | Original Path | Trashed / Status |")
@@ -75,8 +75,13 @@ public struct AuditLogStore: Sendable {
                 status = "Restored to original path"
             } else if let trashed = item.trashedPath {
                 status = "Moved to Trash (`\(trashed)`)"
+            } else if session.wasDryRun {
+                status = "Dry-Run Preview"
+            } else if item.wasToolCommand == true {
+                status = "Tool task completed"
             } else {
-                status = session.wasDryRun ? "Dry-Run Preview" : "Deleted permanently"
+                status = session.mode == .moveToTrash && item.wasToolCommand == false
+                    ? "Moved to Trash" : "Deleted permanently"
             }
             lines.append("| \(item.projectName) | `\(item.title)` | \(ByteFormatting.string(from: item.sizeBytes)) | `\(item.originalPath)` | \(status) |")
         }

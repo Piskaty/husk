@@ -29,6 +29,10 @@ public struct DevCleanerApp: App {
                     viewModel.checkForUpdates(navigateToSettings: true)
                 }
 
+                Button("Changelog") {
+                    viewModel.sidebarDestination = .changelog
+                }
+
                 Button("Settings…") {
                     viewModel.sidebarDestination = .settings
                 }

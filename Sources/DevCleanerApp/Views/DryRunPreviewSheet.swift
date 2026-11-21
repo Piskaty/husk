@@ -4,6 +4,7 @@ import DevCleanerCore
 public struct DryRunPreviewSheet: View {
     @Bindable var viewModel: AppViewModel
     @ViewState private var copiedMarkdown: Bool = false
+    @ViewState private var confirmedToolTasks = false
 
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -12,6 +13,8 @@ public struct DryRunPreviewSheet: View {
     public var body: some View {
         let manifest = viewModel.activeDryRunManifest
             ?? DryRunManifest(items: viewModel.selectedItems, mode: viewModel.deletionMode)
+        let hasToolTasks = manifest.items.contains { $0.actionKind.isToolCommand }
+        let hasFilesystemItems = manifest.items.contains { !$0.actionKind.isToolCommand }
 
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
@@ -30,12 +33,6 @@ public struct DryRunPreviewSheet: View {
                         .font(.system(size: 20, weight: .light))
                         .foregroundStyle(.primary)
                         .monospacedDigit()
-                    if viewModel.diskSpace.freeBytes > 0 {
-                        Text("→ \(ByteFormatting.string(from: viewModel.diskSpace.freeBytes + manifest.totalBytes)) free")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                    }
                 }
             }
 
@@ -105,18 +102,22 @@ public struct DryRunPreviewSheet: View {
                     .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
             )
 
+            if hasToolTasks {
+                Toggle("I confirm that tool tasks can make permanent changes.", isOn: $confirmedToolTasks)
+                    .toggleStyle(.checkbox)
+            }
+
             HStack(spacing: 10) {
                 Menu {
-                    ForEach(DeletionMode.allCases) { mode in
-                        Button(mode.title) {
-                            viewModel.deletionMode = mode
-                            viewModel.activeDryRunManifest = DryRunManifest(
-                                items: viewModel.selectedItems,
-                                mode: mode
-                            )
+                    if hasFilesystemItems {
+                        ForEach(DeletionMode.allCases) { mode in
+                            Button(mode.title) {
+                                viewModel.deletionMode = mode
+                                viewModel.activeDryRunManifest = DryRunManifest(items: manifest.items, mode: mode)
+                            }
                         }
+                        Divider()
                     }
-                    Divider()
                     Button(copiedMarkdown ? "Copied Manifest" : "Copy Markdown Manifest") {
                         viewModel.copyDryRunMarkdownToClipboard()
                         copiedMarkdown = true
@@ -125,7 +126,7 @@ public struct DryRunPreviewSheet: View {
                         viewModel.executeConfirmedCleanup(dryRunOnly: true)
                     }
                 } label: {
-                    Text(viewModel.deletionMode.shortTitle)
+                    Text(hasFilesystemItems ? manifest.mode.shortTitle : "Options")
                         .font(.system(size: 12))
                 }
                 .menuStyle(.borderlessButton)
@@ -140,22 +141,26 @@ public struct DryRunPreviewSheet: View {
                 .keyboardShortcut(.cancelAction)
 
                 Button {
-                    viewModel.executeConfirmedCleanup(dryRunOnly: false)
+                    viewModel.executeConfirmedCleanup(allowIrreversibleToolTasks: confirmedToolTasks)
                 } label: {
-                    Text(
-                        viewModel.deletionMode == .moveToTrash
-                            ? "Move to Trash"
-                            : "Delete Permanently"
-                    )
+                    Text(confirmationTitle(mode: manifest.mode, hasToolTasks: hasToolTasks,
+                                           hasFilesystemItems: hasFilesystemItems))
                     .font(.system(size: 12, weight: .medium))
                     .padding(.horizontal, 8)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(viewModel.deletionMode == .moveToTrash ? nil : .red)
+                .tint(hasToolTasks || manifest.mode == .permanentDelete ? .red : nil)
                 .keyboardShortcut(.defaultAction)
+                .disabled(hasToolTasks && !confirmedToolTasks)
             }
         }
         .padding(20)
         .frame(width: 610)
+    }
+
+    private func confirmationTitle(mode: DeletionMode, hasToolTasks: Bool, hasFilesystemItems: Bool) -> String {
+        if hasToolTasks && !hasFilesystemItems { return "Run Tool Tasks" }
+        let action = mode == .moveToTrash ? "Move to Trash" : "Delete Permanently"
+        return hasToolTasks ? "\(action) & Run Tools" : action
     }
 }

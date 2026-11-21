@@ -33,8 +33,7 @@ public enum GitWorktreeInspector {
 
         guard let porcelainOutput = runGit(
             in: standardizedMain,
-            arguments: ["worktree", "list", "--porcelain"],
-            timeout: 2.0
+            arguments: ["worktree", "list", "--porcelain", "-z"]
         ) else {
             return []
         }
@@ -58,6 +57,7 @@ public enum GitWorktreeInspector {
 
             let existsOnDisk = fm.fileExists(atPath: worktreeURL.path)
             if entry.isPrunable || !existsOnDisk {
+                guard entry.isPrunable, !entry.isLocked else { continue }
                 let metaMetrics = APFSBlockScanner.measureDirectory(at: worktreesMetaDir)
                 let sizeBytes = max(Int64(4096), metaMetrics.allocatedBytes)
                 let metadata = WorktreeMetadata(
@@ -112,7 +112,7 @@ public enum GitWorktreeInspector {
             }()
 
             let daysSinceActivity = max(0, Int(now.timeIntervalSince(metrics.latestModificationDate) / 86_400.0))
-            let hasLockFile = fm.fileExists(atPath: worktreeURL.appendingPathComponent(".git/index.lock").path)
+            let hasLockFile = hasIndexLock(at: worktreeURL)
 
             let protection = ProjectProtectionState(
                 isGitRepo: true,
@@ -148,7 +148,7 @@ public enum GitWorktreeInspector {
             if entry.isLocked {
                 hint = "Locked git worktree; unlock with 'git worktree unlock' before removing"
             } else if isDirty {
-                hint = "Has uncommitted or untracked changes; commit or stash before removing"
+                hint = "Contains modified, untracked, or ignored files. Save or move them before removing."
             } else if !isMerged {
                 hint = "Contains commits not merged into main HEAD; review branch '\(branchDisplay)' before removing"
             } else {
@@ -185,6 +185,16 @@ public enum GitWorktreeInspector {
         return results
     }
 
+    static func canRemove(_ worktreeURL: URL, from mainRepo: URL) -> Bool {
+        guard let output = runGit(in: mainRepo, arguments: ["worktree", "list", "--porcelain", "-z"]),
+              let entry = parsePorcelain(output).dropFirst().first(where: {
+                  SafetyInspector.platformPath(URL(fileURLWithPath: $0.path)) == SafetyInspector.platformPath(worktreeURL)
+              }),
+              !entry.isBare, !entry.isLocked, !entry.isPrunable, let sha = entry.headSHA,
+              !checkWorktreeDirty(at: worktreeURL), !hasIndexLock(at: worktreeURL) else { return false }
+        return checkCommitMergedIntoMain(sha: sha, inMainRepo: mainRepo)
+    }
+
     // MARK: - Helpers
 
     private static func parsePorcelain(_ output: String) -> [RawWorktreeEntry] {
@@ -198,8 +208,7 @@ public enum GitWorktreeInspector {
             }
         }
 
-        for rawLine in output.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
-            let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+        for line in output.split(separator: "\0", omittingEmptySubsequences: false) {
             if line.isEmpty {
                 flush()
                 continue
@@ -224,12 +233,11 @@ public enum GitWorktreeInspector {
         return entries
     }
 
-    /// Checks BOTH modified tracked files AND untracked files in a worktree (since `git worktree remove` deletes untracked files).
+    /// Git can remove ignored files even without force. Include them in both safety checks.
     private static func checkWorktreeDirty(at worktreeURL: URL) -> Bool {
         guard let output = runGit(
             in: worktreeURL,
-            arguments: ["--no-optional-locks", "status", "--porcelain"],
-            timeout: 2.0
+            arguments: ["--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignored=matching"]
         ) else {
             return true // Err on the side of safety if git status fails
         }
@@ -237,61 +245,18 @@ public enum GitWorktreeInspector {
     }
 
     private static func checkCommitMergedIntoMain(sha: String, inMainRepo mainRepo: URL) -> Bool {
-        let gitURL = URL(fileURLWithPath: "/usr/bin/git")
-        guard FileManager.default.isExecutableFile(atPath: gitURL.path) else { return false }
-
-        let process = Process()
-        process.executableURL = gitURL
-        process.arguments = ["-C", mainRepo.path, "merge-base", "--is-ancestor", sha, "HEAD"]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-
-        let deadline = Date().addingTimeInterval(1.5)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-        if process.isRunning {
-            process.terminate()
-            return false
-        }
-        return process.terminationStatus == 0
+        runGit(in: mainRepo, arguments: ["merge-base", "--is-ancestor", sha, "HEAD"]) != nil
     }
 
-    private static func runGit(in directory: URL, arguments: [String], timeout: TimeInterval) -> String? {
-        let gitURL = URL(fileURLWithPath: "/usr/bin/git")
-        guard FileManager.default.isExecutableFile(atPath: gitURL.path) else { return nil }
+    private static func hasIndexLock(at worktree: URL) -> Bool {
+        guard let path = runGit(in: worktree, arguments: ["rev-parse", "--path-format=absolute", "--git-path", "index.lock"]),
+              path.hasPrefix("/") else { return true }
+        return FileManager.default.fileExists(atPath: path.hasSuffix("\n") ? String(path.dropLast()) : path)
+    }
 
-        let process = Process()
-        process.executableURL = gitURL
-        process.arguments = ["-C", directory.path] + arguments
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-        if process.isRunning {
-            process.terminate()
-            return nil
-        }
-        guard process.terminationStatus == 0 else { return nil }
-
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
+    private static func runGit(in directory: URL, arguments: [String]) -> String? {
+        try? CommandRunner.run("/usr/bin/git", arguments: ["-C", directory.path] + arguments,
+                               timeout: 5, captureOutput: true)
     }
 
     private static func formatRepoName(repoDir: URL, workspaceRoot: URL) -> String {

@@ -308,6 +308,7 @@ public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
     public let rebuildCommand: String?
     public let actionKind: CleanupActionKind
     public let worktree: WorktreeMetadata?
+    let targetIdentity: CleanupTargetIdentity?
 
     public init(
         id: String? = nil,
@@ -345,6 +346,7 @@ public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
         self.rebuildCommand = rebuildCommand
         self.actionKind = actionKind
         self.worktree = worktree
+        self.targetIdentity = CleanupTargetIdentity.read(at: path)
     }
 
     public var effectiveSafetyTier: SafetyTier {
@@ -382,6 +384,7 @@ public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
     }
 
     public func isEligibleForSafeSweep(minimumStaleDays: Int = 30) -> Bool {
+        guard !actionKind.isToolCommand else { return false }
         guard !protection.isShielded else { return false }
         guard effectiveSafetyTier == .safeRebuildable else { return false }
         return stalenessDays >= minimumStaleDays
@@ -442,7 +445,7 @@ public struct DryRunManifest: Codable, Sendable, Equatable {
         }
         let toolItems = items.filter { $0.actionKind.isToolCommand }
         if !toolItems.isEmpty {
-            notes.append("Includes \(toolItems.count) CLI tool subcommand task(s) (e.g. git gc / simctl / brew / docker).")
+            notes.append("\(toolItems.count) tool task(s) run directly and cannot be undone. Worktree removals permanently delete the checkout. Worktree pruning affects stale registrations across its repository.")
         }
         if mode == .permanentDelete {
             notes.append("Permanent Delete is selected: items bypass macOS Trash and cannot be undone.")
@@ -457,7 +460,7 @@ public struct DryRunManifest: Codable, Sendable, Equatable {
         lines.append("- **Generated**: \(formatter.string(from: generatedAt))")
         lines.append("- **Action Mode**: \(mode.title)")
         lines.append("- **Selected Items**: \(items.count) (\(totalFiles) files)")
-        lines.append("- **Total Space to Reclaim**: \(ByteFormatting.string(from: totalBytes))")
+        lines.append("- **Selected Size**: \(ByteFormatting.string(from: totalBytes))")
         lines.append("")
         if !warnings.isEmpty {
             lines.append("## Warnings")
@@ -488,6 +491,7 @@ public struct CleanedItemRecord: Codable, Sendable, Equatable, Identifiable {
     public var isRestored: Bool
     public let errorDescription: String?
     public let rebuildCommand: String?
+    let wasToolCommand: Bool?
 
     public init(
         title: String,
@@ -499,7 +503,8 @@ public struct CleanedItemRecord: Codable, Sendable, Equatable, Identifiable {
         sizeBytes: Int64,
         isRestored: Bool = false,
         errorDescription: String? = nil,
-        rebuildCommand: String? = nil
+        rebuildCommand: String? = nil,
+        wasToolCommand: Bool? = nil
     ) {
         self.title = title
         self.projectName = projectName
@@ -511,6 +516,7 @@ public struct CleanedItemRecord: Codable, Sendable, Equatable, Identifiable {
         self.isRestored = isRestored
         self.errorDescription = errorDescription
         self.rebuildCommand = rebuildCommand
+        self.wasToolCommand = wasToolCommand
     }
 
     public var canRestore: Bool {
@@ -525,6 +531,7 @@ public struct CleanupSessionRecord: Codable, Sendable, Equatable, Identifiable {
     public let mode: DeletionMode
     public let wasDryRun: Bool
     public let totalBytesReclaimed: Int64
+    let usesObservedFreeSpace: Bool?
     public var items: [CleanedItemRecord]
 
     public init(
@@ -533,13 +540,15 @@ public struct CleanupSessionRecord: Codable, Sendable, Equatable, Identifiable {
         mode: DeletionMode,
         wasDryRun: Bool,
         totalBytesReclaimed: Int64,
-        items: [CleanedItemRecord]
+        items: [CleanedItemRecord],
+        usesObservedFreeSpace: Bool? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
         self.mode = mode
         self.wasDryRun = wasDryRun
         self.totalBytesReclaimed = totalBytesReclaimed
+        self.usesObservedFreeSpace = usesObservedFreeSpace
         self.items = items
     }
 
@@ -549,6 +558,21 @@ public struct CleanupSessionRecord: Codable, Sendable, Equatable, Identifiable {
 
     public var formattedTotalReclaimed: String {
         ByteFormatting.string(from: totalBytesReclaimed)
+    }
+
+    public var totalBytesMovedToTrash: Int64 {
+        items.lazy.filter { $0.trashedPath != nil }.reduce(0) { $0 + $1.sizeBytes }
+    }
+
+    public var storageSummary: String {
+        if wasDryRun { return "\(formattedTotalReclaimed) selected" }
+        let moved = totalBytesMovedToTrash > 0
+            ? "\(ByteFormatting.string(from: totalBytesMovedToTrash)) moved to Trash"
+            : nil
+        if usesObservedFreeSpace == true {
+            return [moved, "\(formattedTotalReclaimed) free space gained"].compactMap { $0 }.joined(separator: " · ")
+        }
+        return moved ?? "\(formattedTotalReclaimed) processed (estimate)"
     }
 
     /// Generates a shell script that re-runs the install/build command for all cleaned project items in this session.
