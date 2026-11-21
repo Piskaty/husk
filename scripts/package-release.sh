@@ -26,7 +26,7 @@ DMG_NAME="Husk-${VERSION}-macos-arm64.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
 
 # 2. Create distributable .zip archive (preserves code signature & resource forks)
-/usr/bin/lipo -verify_arch arm64 "$APP_BUNDLE/Contents/MacOS/Husk"
+/usr/bin/lipo "$APP_BUNDLE/Contents/MacOS/Husk" -verify_arch arm64
 rm -f "$ZIP_PATH" "$ZIP_PATH.sig" "$DMG_PATH"
 echo "▸ Creating release archive: $ZIP_NAME..."
 ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_PATH"
