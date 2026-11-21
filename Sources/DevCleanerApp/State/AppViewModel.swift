@@ -14,6 +14,8 @@ public enum SidebarDestination: Hashable, Identifiable {
     case shieldedProjects
     case tier(SafetyTier)
     case auditHistory
+    case scanChanges
+    case dockerStorage
     case changelog
     case settings
 
@@ -28,6 +30,8 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .shieldedProjects: return "shielded_projects"
         case .tier(let tier): return "tier_\(tier.rawValue)"
         case .auditHistory: return "audit_history"
+        case .scanChanges: return "scan_changes"
+        case .dockerStorage: return "docker_storage"
         case .changelog: return "changelog"
         case .settings: return "settings"
         }
@@ -44,6 +48,8 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .shieldedProjects: return "Protected"
         case .tier(let tier): return tier.shortLabel
         case .auditHistory: return "History"
+        case .scanChanges: return "Since Last Scan"
+        case .dockerStorage: return "Docker Storage"
         case .changelog: return "Changelog"
         case .settings: return "Settings"
         }
@@ -60,6 +66,8 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .shieldedProjects: return "Protected due to recent activity, dirty git tree, or active lock"
         case .tier(let tier): return tier.explanation
         case .auditHistory: return "Past cleanup sessions with 1-click restore from Trash and rebuild scripts"
+        case .scanChanges: return "Projects and folders that grew between your last two scans"
+        case .dockerStorage: return "Storage usage reported by your local Docker engine"
         case .changelog: return "Changes in every Husk release"
         case .settings: return "Configure safety thresholds, scan scope, exclusions, menu bar alerts, and app updates"
         }
@@ -76,6 +84,8 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .shieldedProjects: return "shield"
         case .tier(let tier): return tier.badgeIcon
         case .auditHistory: return "clock.arrow.circlepath"
+        case .scanChanges: return "chart.line.uptrend.xyaxis"
+        case .dockerStorage: return "shippingbox"
         case .changelog: return "list.bullet.rectangle"
         case .settings: return "gearshape"
         }
@@ -180,10 +190,13 @@ public final class AppViewModel {
     public var isShowingWhatsNew = false
     public var activeDryRunManifest: DryRunManifest? = nil
     public var auditSessions: [CleanupSessionRecord] = []
+    public private(set) var scanComparison: ScanComparison?
+    public private(set) var scanComparisonError: String?
     public var statusBanner: StatusBannerState? = nil
 
     private let scanner = APFSBlockScanner()
     private let auditStore = AuditLogStore()
+    private let scanHistory = ScanHistoryStore(storageDirectory: AuditLogStore().storageDirectory.deletingLastPathComponent())
     private let updateService = UpdateService()
     private var scanTask: Task<Void, Never>? = nil
 
@@ -271,14 +284,34 @@ public final class AppViewModel {
     /// Active items after filtering out any user-excluded paths.
     public var items: [CleanupItem] {
         guard !ignoredPaths.isEmpty else { return allScannedItems }
-        return allScannedItems.filter { item in
-            let itemPath = item.path.standardizedFileURL.path
-            let projPath = item.projectRootPath?.standardizedFileURL.path
-            return !ignoredPaths.contains { ignored in
-                itemPath == ignored
-                    || itemPath.hasPrefix(ignored + "/")
-                    || projPath == ignored
-            }
+        return allScannedItems.filter { !isExcluded($0) }
+    }
+
+    private func isExcluded(_ item: CleanupItem) -> Bool {
+        let path = item.path.standardizedFileURL.path
+        let projectPath = item.projectRootPath?.standardizedFileURL.path
+        return ignoredPaths.contains { ignored in
+            path == ignored || path.hasPrefix(ignored + "/") || projectPath == ignored
+        }
+    }
+
+    private var selectableItems: [CleanupItem] {
+        items.flatMap { item in
+            [item] + (item.worktreeArtifacts ?? []).filter { !isExcluded($0) }
+        }
+    }
+
+    public func worktreeArtifacts(for worktree: CleanupItem) -> [CleanupItem] {
+        (worktree.worktreeArtifacts ?? []).filter { !isExcluded($0) && matchesItemFilters($0) }
+    }
+
+    public func canAddWorktreeToScan(_ worktree: CleanupItem) -> Bool {
+        guard worktree.worktree?.isPrunable == false,
+              !SafetyInspector().isForbiddenPath(worktree.path) else { return false }
+        let path = worktree.path.resolvingSymlinksInPath().path
+        return !workspaceRoots.contains { root in
+            let rootPath = root.resolvingSymlinksInPath().path
+            return path == rootPath || path.hasPrefix(rootPath == "/" ? "/" : rootPath + "/")
         }
     }
 
@@ -343,7 +376,8 @@ public final class AppViewModel {
     }
 
     public var selectedItems: [CleanupItem] {
-        items.filter { selectedIDs.contains($0.id) }
+        guard !selectedIDs.isEmpty else { return [] }
+        return selectableItems.filter { selectedIDs.contains($0.id) }
     }
 
     public var selectedTotalBytes: Int64 {
@@ -414,27 +448,12 @@ public final class AppViewModel {
             result = result.filter(\.protection.isShielded)
         case .tier(let tier):
             result = result.filter { $0.effectiveSafetyTier == tier }
-        case .auditHistory, .changelog, .settings:
+        case .auditHistory, .scanChanges, .dockerStorage, .changelog, .settings:
             break
         }
 
-        if let selectedEcosystem {
-            result = result.filter { $0.ecosystem == selectedEcosystem }
-        }
-
-        if let selectedStalenessBucket {
-            result = result.filter { $0.stalenessBucket == selectedStalenessBucket }
-        }
-
-        let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if !trimmedQuery.isEmpty {
-            result = result.filter { item in
-                item.projectName.lowercased().contains(trimmedQuery)
-                    || item.title.lowercased().contains(trimmedQuery)
-                    || item.displayPath.lowercased().contains(trimmedQuery)
-                    || item.ecosystem.title.lowercased().contains(trimmedQuery)
-                    || item.category.title.lowercased().contains(trimmedQuery)
-            }
+        result = result.filter {
+            matchesItemFilters($0) || (sidebarDestination == .worktrees && !worktreeArtifacts(for: $0).isEmpty)
         }
 
         switch sortOrder {
@@ -461,6 +480,15 @@ public final class AppViewModel {
         }
 
         return result
+    }
+
+    private func matchesItemFilters(_ item: CleanupItem) -> Bool {
+        if let selectedEcosystem, selectedEcosystem != item.ecosystem { return false }
+        if let selectedStalenessBucket, selectedStalenessBucket != item.stalenessBucket { return false }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return true }
+        return [item.projectName, item.title, item.displayPath, item.ecosystem.title, item.category.title]
+            .contains { $0.localizedCaseInsensitiveContains(query) }
     }
 
     // MARK: - Scanning & Exclusions
@@ -500,8 +528,23 @@ public final class AppViewModel {
 
             guard !Task.isCancelled else { return }
             let elapsed = Date().timeIntervalSince(startedAt)
+            let snapshot = ScanSnapshot(
+                scope: .init(configuration: config, excludedPaths: self.ignoredPaths),
+                startedAt: startedAt,
+                items: scannedItems.filter { !self.isExcluded($0) }
+            )
+            do {
+                let comparison = try await self.scanHistory.record(snapshot)
+                guard !Task.isCancelled else { return }
+                self.scanComparison = comparison
+                self.scanComparisonError = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.scanComparison = nil
+                self.scanComparisonError = "The scan comparison could not be saved."
+            }
             self.allScannedItems = scannedItems
-            let validIDs = Set(self.items.map(\.id))
+            let validIDs = Set(self.selectableItems.map(\.id))
             self.selectedIDs = self.selectedIDs.intersection(validIDs)
             self.isScanning = false
             self.lastScanDurationSeconds = elapsed
@@ -655,8 +698,19 @@ public final class AppViewModel {
         if selectedIDs.contains(item.id) {
             selectedIDs.remove(item.id)
         } else {
-            selectedIDs.insert(item.id)
+            selectItem(item)
         }
+    }
+
+    private func selectItem(_ item: CleanupItem) {
+        if let worktreePath = item.containingWorktreePath {
+            if let parent = worktreeItems.first(where: { $0.path == worktreePath }) {
+                selectedIDs.remove(parent.id)
+            }
+        } else if let artifacts = item.worktreeArtifacts {
+            selectedIDs.subtract(artifacts.map(\.id))
+        }
+        selectedIDs.insert(item.id)
     }
 
     public func applySafeSweepSelection(andPreview: Bool = false) {
@@ -679,7 +733,7 @@ public final class AppViewModel {
             !$0.protection.isShielded && $0.effectiveSafetyTier != .protectedManual
         }
         for item in safeInView {
-            selectedIDs.insert(item.id)
+            selectItem(item)
         }
     }
 
@@ -845,6 +899,11 @@ public final class AppViewModel {
 
     public func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    public func revealTrashItems(_ session: CleanupSessionRecord) {
+        let urls = session.remainingTrash.urls
+        if !urls.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(urls) }
     }
 
     public func openInTerminal(_ url: URL) {

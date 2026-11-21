@@ -7,7 +7,8 @@ enum CommandRunner {
         _ executable: String,
         arguments: [String],
         timeout: TimeInterval,
-        captureOutput: Bool = false
+        captureOutput: Bool = false,
+        environment: [String: String]? = nil
     ) throws -> String {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("husk-command-\(UUID().uuidString)", isDirectory: true)
@@ -30,6 +31,7 @@ enum CommandRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = environment
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = stdout ?? FileHandle.nullDevice
         process.standardError = stderr

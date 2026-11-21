@@ -13,6 +13,13 @@ struct CleanupTargetIdentity: Codable, Equatable, Sendable {
         return Self(device: device.uint64Value, inode: inode.uint64Value,
                     creationDate: attributes[.creationDate] as? Date)
     }
+
+    func matchesRecordedIdentity(at url: URL) -> Bool {
+        guard let current = Self.read(at: url), current.device == device, current.inode == inode else { return false }
+        // Audit log timestamps use ISO 8601 with second precision.
+        return current.creationDate?.timeIntervalSince1970.rounded(.down)
+            == creationDate?.timeIntervalSince1970.rounded(.down)
+    }
 }
 
 public actor GitInspectionCache {
@@ -287,6 +294,29 @@ public struct SafetyInspector: Sendable {
         return nil
     }
 
+    static func projectArtifactTreeError(for url: URL) -> SafetyValidationError? {
+        if let error = pathComponentError(for: url) { return error }
+
+        var inspectionFailed = false
+        guard let entries = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [],
+            options: [],
+            errorHandler: { _, _ in
+                inspectionFailed = true
+                return false
+            }
+        ) else { return .targetChanged(url.path) }
+
+        for case let entry as URL in entries {
+            if Task.isCancelled { return .targetChanged(url.path) }
+            if entry.lastPathComponent.lowercased() == ".git" {
+                return .containsGitCheckout(entry.deletingLastPathComponent().path)
+            }
+        }
+        return inspectionFailed ? .targetChanged(url.path) : nil
+    }
+
     static func platformPath(_ url: URL) -> String {
         let path = url.standardizedFileURL.path
         // These macOS aliases have stable system-owned targets.
@@ -488,6 +518,7 @@ public enum SafetyValidationError: Error, LocalizedError, Sendable, Equatable {
     case cannotDeleteScanRootItself(String)
     case outsideAllowedBoundaries(String)
     case targetChanged(String)
+    case containsGitCheckout(String)
 
     public var errorDescription: String? {
         switch self {
@@ -501,6 +532,8 @@ public enum SafetyValidationError: Error, LocalizedError, Sendable, Equatable {
             return "Path is outside configured workspace and cache boundaries: \(path)"
         case .targetChanged(let path):
             return "The target changed since the scan or is inaccessible. Rescan before cleaning: \(path)"
+        case .containsGitCheckout(let path):
+            return "The cleanup folder contains a Git checkout at \(path)."
         }
     }
 }

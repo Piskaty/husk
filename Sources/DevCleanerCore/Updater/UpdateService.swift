@@ -137,8 +137,8 @@ public enum UpdateInstallPhase: Sendable, Equatable {
 }
 
 public struct UpdateService: Sendable {
-    public static let currentAppVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.5"
-    public static let currentBuildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "6"
+    public static let currentAppVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.6"
+    public static let currentBuildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "7"
     static let releaseSigningPublicKey = "uGF8YCWlDXzBpsDwjQlk48PxFdhUHB3RPUF/uhSiNaM="
     public static let defaultGitHubRepo = "Piskaty/husk"
 

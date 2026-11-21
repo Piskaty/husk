@@ -272,20 +272,29 @@ struct DevCleanerCoreTests {
         #expect(liveSession.restorableItemCount == 1)
         #expect(liveSession.totalBytesReclaimed == 0)
         #expect(liveSession.totalBytesMovedToTrash > 0)
+        #expect(liveSession.remainingTrash.estimatedBytes == liveSession.totalBytesMovedToTrash)
         #expect(FileManager.default.fileExists(atPath: nodeModules.path) == false)
 
         let trashedPath = try #require(liveSession.items.first?.trashedPath)
         #expect(FileManager.default.fileExists(atPath: trashedPath) == true)
+        #expect(liveSession.remainingTrash.urls.map(\.path) == [trashedPath])
+        let recordedLiveSession = try #require(auditStore.loadSessions().first { $0.id == liveSession.id })
+        #expect(recordedLiveSession.remainingTrash.urls.map(\.path) == [trashedPath])
 
         // 3. 1-Click Undo -> Restored back to original path
         let restoredSession = try executor.undoSession(liveSession)
         #expect(restoredSession.restorableItemCount == 0)
         #expect(restoredSession.items.first?.isRestored == true)
         #expect(FileManager.default.fileExists(atPath: sampleFile.path) == true)
+        #expect(liveSession.remainingTrash.urls.isEmpty)
+        #expect(restoredSession.remainingTrash.estimatedBytes == 0)
 
         // 4. Verify AuditLogStore persisted both sessions
         let persistedSessions = auditStore.loadSessions()
         #expect(persistedSessions.count == 2)
+
+        try writeDummyFile(at: URL(fileURLWithPath: trashedPath), content: "a different Trash item")
+        #expect(recordedLiveSession.remainingTrash.urls.isEmpty)
 
         // 5. Verify Rebuild Shell Script generation (Feature #7)
         let rebuildScript = try #require(liveSession.rebuildShellScript)
@@ -445,7 +454,8 @@ struct DevCleanerCoreTests {
         try runGit(["config", "user.name", "Husk Test"], in: mainRepo)
         try runGit(["config", "user.email", "test@husk.app"], in: mainRepo)
         try writeDummyFile(at: mainRepo.appendingPathComponent("README.md"), content: "# Core App\n")
-        try writeDummyFile(at: mainRepo.appendingPathComponent(".gitignore"), content: ".env\n")
+        try writeDummyFile(at: mainRepo.appendingPathComponent(".gitignore"), content: ".env\nnode_modules/\n.next/\n")
+        try writeDummyFile(at: mainRepo.appendingPathComponent("package.json"), content: "{}")
         try runGit(["add", "."], in: mainRepo)
         try runGit(["commit", "-m", "initial commit"], in: mainRepo)
 
@@ -458,16 +468,22 @@ struct DevCleanerCoreTests {
         let oldDate = now.addingTimeInterval(-20 * 86_400)
         try setModificationDate(oldDate, for: mergedWT.appendingPathComponent("README.md"))
         try setModificationDate(oldDate, for: mergedWT.appendingPathComponent(".gitignore"))
+        try setModificationDate(oldDate, for: mergedWT.appendingPathComponent("package.json"))
         try setModificationDate(oldDate, for: mergedWT.appendingPathComponent(".git"))
         try setModificationDate(oldDate, for: mergedWT)
 
         // Worktree 2: Unmerged commit + Dirty untracked file
-        let dirtyWT = box.sandboxRoot.appendingPathComponent("wt-dirty", isDirectory: true)
+        let dirtyWT = box.workspaceRoot.appendingPathComponent("wt-dirty", isDirectory: true)
         try runGit(["worktree", "add", "-b", "feat/wip-branch", dirtyWT.path, "main"], in: mainRepo)
         try writeDummyFile(at: dirtyWT.appendingPathComponent("feature.swift"), content: "let x = 1\n")
+        let trackedBuildFile = dirtyWT.appendingPathComponent(".next/keep.js")
+        try writeDummyFile(at: trackedBuildFile)
         try runGit(["add", "feature.swift"], in: dirtyWT)
+        try runGit(["add", "-f", ".next/keep.js"], in: dirtyWT)
         try runGit(["commit", "-m", "wip unmerged commit"], in: dirtyWT)
         try writeDummyFile(at: dirtyWT.appendingPathComponent("untracked-notes.txt"), content: "do not lose me\n")
+        let artifactFile = dirtyWT.appendingPathComponent("node_modules/cache.js")
+        try writeDummyFile(at: artifactFile)
 
         let scanner = APFSBlockScanner()
         let config = ScanConfiguration(
@@ -497,6 +513,13 @@ struct DevCleanerCoreTests {
         #expect(dirtyItem.protection.isShielded == true)
         #expect(dirtyItem.effectiveSafetyTier == .protectedManual)
         #expect(dirtyItem.worktree?.statusBadgeText == "Unmerged")
+        let buildFolder = try #require(dirtyItem.worktreeArtifacts?.first)
+        #expect(dirtyItem.worktreeArtifacts?.count == 1)
+        #expect(buildFolder.path.lastPathComponent == "node_modules")
+        #expect(buildFolder.containingWorktreePath == dirtyItem.path)
+        #expect(buildFolder.effectiveSafetyTier == .protectedManual)
+        #expect(!buildFolder.isEligibleForSafeSweep(minimumStaleDays: 0))
+        #expect(items.allSatisfy { $0.id != buildFolder.id })
 
         // Execute cleanup on the merged & clean worktree via CleanupExecutor (`git worktree remove`)
         let inspector = SafetyInspector(homeDirectory: box.fakeHomeRoot)
@@ -506,6 +529,29 @@ struct DevCleanerCoreTests {
             auditStore: auditStore,
             customTrashDirectory: box.trashRoot
         )
+
+        let overlap = try executor.execute(
+            items: [dirtyItem, buildFolder], mode: .moveToTrash, dryRun: true,
+            allowedWorkspaceRoots: [box.workspaceRoot]
+        )
+        #expect(overlap.items.last?.errorDescription != nil)
+
+        try runGit(["add", "-f", "node_modules/cache.js"], in: dirtyWT)
+        let newlyTracked = try executor.execute(
+            items: [buildFolder], mode: .moveToTrash, allowedWorkspaceRoots: [box.workspaceRoot]
+        )
+        #expect(newlyTracked.items.first?.errorDescription != nil)
+        #expect(FileManager.default.fileExists(atPath: artifactFile.path))
+        try runGit(["reset", "HEAD", "--", "node_modules/cache.js"], in: dirtyWT)
+
+        let partialCleanup = try executor.execute(
+            items: [buildFolder], mode: .moveToTrash, allowedWorkspaceRoots: [box.workspaceRoot]
+        )
+        #expect(partialCleanup.items.first?.errorDescription == nil)
+        #expect(partialCleanup.restorableItemCount == 1)
+        #expect(!FileManager.default.fileExists(atPath: artifactFile.path))
+        #expect(FileManager.default.fileExists(atPath: trackedBuildFile.path))
+        #expect(FileManager.default.fileExists(atPath: dirtyWT.appendingPathComponent("untracked-notes.txt").path))
 
         let unconfirmed = try executor.execute(
             items: [mergedItem],
@@ -537,6 +583,112 @@ struct DevCleanerCoreTests {
         #expect(session.restorableItemCount == 0)
         #expect(FileManager.default.fileExists(atPath: mergedWT.path) == false)
         #expect(FileManager.default.fileExists(atPath: dirtyWT.path) == true)
+    }
+
+    @Test("Build folders with embedded Git checkouts are omitted and stale selections are blocked")
+    func protectsEmbeddedGitCheckouts() async throws {
+        let box = try TestSandbox()
+        defer { box.cleanup() }
+
+        let mainRepo = box.workspaceRoot.appendingPathComponent("main", isDirectory: true)
+        try writeDummyFile(at: mainRepo.appendingPathComponent("package.json"), content: "{}")
+        try writeDummyFile(at: mainRepo.appendingPathComponent(".gitignore"), content: "node_modules/\n.next/\n")
+        func runGit(_ arguments: [String], in directory: URL) throws {
+            try CommandRunner.run("/usr/bin/git", arguments: ["-C", directory.path] + arguments, timeout: 5)
+        }
+        try runGit(["init", "-b", "main"], in: mainRepo)
+        try runGit(["add", "package.json", ".gitignore"], in: mainRepo)
+        try runGit(["-c", "user.name=Husk Test", "-c", "user.email=test@husk.app",
+                    "-c", "commit.gpgsign=false", "commit", "-m", "initial"], in: mainRepo)
+
+        let outer = box.workspaceRoot.appendingPathComponent("outer", isDirectory: true)
+        try runGit(["worktree", "add", "-b", "outer", outer.path], in: mainRepo)
+        let worktreeArtifact = outer.appendingPathComponent("node_modules", isDirectory: true)
+        let standardArtifact = mainRepo.appendingPathComponent(".next", isDirectory: true)
+        try writeDummyFile(at: worktreeArtifact.appendingPathComponent("generated.js"))
+        try writeDummyFile(at: standardArtifact.appendingPathComponent("generated.js"))
+
+        let config = ScanConfiguration(workspaceRoots: [box.workspaceRoot], homeDirectory: box.fakeHomeRoot,
+                                       includeGlobalCaches: false)
+        let scanner = APFSBlockScanner()
+        let initialItems = await scanner.scan(configuration: config)
+        let outerItem = try #require(initialItems.first { $0.worktree != nil && $0.path.lastPathComponent == "outer" })
+        let selectedWorktreeArtifact = try #require(outerItem.worktreeArtifacts?.first)
+        let selectedStandardArtifact = try #require(initialItems.first { $0.path == standardArtifact.standardizedFileURL })
+
+        let embeddedWorktree = worktreeArtifact.appendingPathComponent(".embedded", isDirectory: true)
+        try runGit(["worktree", "add", "-b", "embedded", embeddedWorktree.path], in: mainRepo)
+        let worktreeNotes = embeddedWorktree.appendingPathComponent("local-notes.txt")
+        try writeDummyFile(at: worktreeNotes, content: "Work in progress")
+
+        let embeddedRepo = standardArtifact.appendingPathComponent("local-repository", isDirectory: true)
+        let repositoryNotes = embeddedRepo.appendingPathComponent("notes.txt")
+        try writeDummyFile(at: repositoryNotes, content: "Keep these files")
+        try runGit(["init"], in: embeddedRepo)
+
+        let rescanned = await scanner.scan(configuration: config)
+        let rescannedOuter = try #require(rescanned.first { $0.id == outerItem.id })
+        #expect(rescannedOuter.worktreeArtifacts?.isEmpty != false)
+        #expect(rescanned.allSatisfy { $0.path != standardArtifact.standardizedFileURL })
+        #expect(rescanned.contains { $0.worktree != nil && $0.path.lastPathComponent == ".embedded" })
+
+        let executor = CleanupExecutor(safetyInspector: SafetyInspector(homeDirectory: box.fakeHomeRoot),
+                                       auditStore: AuditLogStore(storageDirectory: box.auditRoot),
+                                       customTrashDirectory: box.trashRoot)
+        let staleSelection = [selectedWorktreeArtifact, selectedStandardArtifact]
+        let dryRun = try executor.execute(items: staleSelection, mode: .permanentDelete, dryRun: true,
+                                         allowedWorkspaceRoots: [box.workspaceRoot])
+        let trashAttempt = try executor.execute(items: staleSelection, mode: .moveToTrash,
+                                               allowedWorkspaceRoots: [box.workspaceRoot])
+        #expect(dryRun.items.count == 2)
+        #expect(trashAttempt.items.count == 2)
+        #expect((dryRun.items + trashAttempt.items).allSatisfy {
+            $0.errorDescription?.contains("contains a Git checkout") == true
+        })
+        #expect(FileManager.default.fileExists(atPath: worktreeNotes.path))
+        #expect(FileManager.default.fileExists(atPath: repositoryNotes.path))
+    }
+
+    @Test("Old Trash records cannot claim or restore an item at a reused path")
+    func refusesUnverifiedTrashRecords() throws {
+        let box = try TestSandbox()
+        defer { box.cleanup() }
+
+        let reusedPath = box.trashRoot.appendingPathComponent("node_modules")
+        try writeDummyFile(at: reusedPath, content: "Current item")
+        let currentOrigin = box.workspaceRoot.appendingPathComponent("current/node_modules")
+        let legacyOrigin = box.workspaceRoot.appendingPathComponent("old/node_modules")
+        let current = CleanedItemRecord(title: "node_modules", projectName: "Current", category: .projectArtifacts,
+                                       ecosystem: .node, originalPath: currentOrigin.path, trashedPath: reusedPath.path,
+                                       sizeBytes: 256)
+        let encodedLegacy = try JSONEncoder().encode(
+            CleanedItemRecord(title: "node_modules", projectName: "Old", category: .projectArtifacts, ecosystem: .node,
+                              originalPath: legacyOrigin.path, trashedPath: reusedPath.path, sizeBytes: 1_024)
+        )
+        var oldFields = try #require(JSONSerialization.jsonObject(with: encodedLegacy) as? [String: Any])
+        oldFields.removeValue(forKey: "trashedIdentity")
+        let legacy = try JSONDecoder().decode(CleanedItemRecord.self, from: JSONSerialization.data(withJSONObject: oldFields))
+
+        let legacySession = CleanupSessionRecord(mode: .moveToTrash, wasDryRun: false, totalBytesReclaimed: 0, items: [legacy])
+        let currentSession = CleanupSessionRecord(mode: .moveToTrash, wasDryRun: false, totalBytesReclaimed: 0, items: [current])
+        #expect(legacySession.remainingTrash.itemStatuses[legacy.id] == .unverified)
+        #expect(legacySession.remainingTrash.urls.isEmpty)
+        #expect(legacySession.remainingTrash.estimatedBytes == 0)
+        #expect(legacySession.restorableItemCount == 0)
+        #expect(currentSession.remainingTrash.itemStatuses[current.id] == .verified(reusedPath.standardizedFileURL))
+        #expect(currentSession.remainingTrash.estimatedBytes == 256)
+
+        let executor = CleanupExecutor(auditStore: AuditLogStore(storageDirectory: box.auditRoot),
+                                       customTrashDirectory: box.trashRoot)
+        let denied = try executor.undoSession(legacySession)
+        #expect(denied.items.first?.isRestored == false)
+        #expect(FileManager.default.fileExists(atPath: reusedPath.path))
+        #expect(!FileManager.default.fileExists(atPath: legacyOrigin.path))
+
+        let allowed = try executor.undoSession(currentSession)
+        #expect(allowed.items.first?.isRestored == true)
+        #expect(try String(contentsOf: currentOrigin, encoding: .utf8) == "Current item")
+        #expect(legacySession.remainingTrash.itemStatuses[legacy.id] == .unavailable)
     }
 
     @Test("Cleanup refuses a replaced folder and any symlink in its parents")
@@ -624,13 +776,99 @@ struct DevCleanerCoreTests {
             .deletingLastPathComponent().deletingLastPathComponent()
         let content = try String(contentsOf: repository.appendingPathComponent("CHANGELOG.md"), encoding: .utf8)
         let releases = ChangelogRelease.parse(content)
-        let current = try #require(SemanticVersion(string: "1.0.5"))
+        let current = try #require(SemanticVersion(string: "1.0.6"))
         let previous = try #require(SemanticVersion(string: "1.0.2"))
-        #expect(releases.map(\.id).suffix(6) == ["1.0.5", "1.0.4", "1.0.3", "1.0.2", "1.0.1", "1.0.0"])
+        #expect(releases.map(\.id).suffix(7) == ["1.0.6", "1.0.5", "1.0.4", "1.0.3", "1.0.2", "1.0.1", "1.0.0"])
         #expect(ChangelogRelease.whatsNew(in: releases, current: current, previous: previous).map(\.id)
-                == ["1.0.5", "1.0.4", "1.0.3"])
-        #expect(ChangelogRelease.whatsNew(in: releases, current: current, previous: nil).map(\.id) == ["1.0.5"])
+                == ["1.0.6", "1.0.5", "1.0.4", "1.0.3"])
+        #expect(ChangelogRelease.whatsNew(in: releases, current: current, previous: nil).map(\.id) == ["1.0.6"])
         #expect(ChangelogRelease.whatsNew(in: releases, current: current, previous: current).isEmpty)
+    }
+
+    @Test("Scan comparisons persist two matching snapshots and count growth once per project")
+    func comparesSavedScans() async throws {
+        let box = try TestSandbox()
+        defer { box.cleanup() }
+        let store = ScanHistoryStore(storageDirectory: box.auditRoot)
+        let configuration = ScanConfiguration(workspaceRoots: [box.workspaceRoot], includeGlobalCaches: false)
+        let scope = ScanSnapshot.Scope(configuration: configuration, excludedPaths: [])
+        let project = box.workspaceRoot.appendingPathComponent("app")
+        let firstDate = Date(timeIntervalSince1970: 1_000)
+        func artifact(_ folder: String, _ bytes: Int64) -> CleanupItem {
+            CleanupItem(ruleId: folder, title: folder, projectName: "app", projectRootPath: project,
+                        path: project.appendingPathComponent(folder), category: .projectArtifacts, ecosystem: .node,
+                        baseSafetyTier: .safeRebuildable, allocatedSizeBytes: bytes, fileCount: 1,
+                        lastModified: firstDate,
+                        protection: .init(isGitRepo: false, hasUncommittedChanges: false, daysSinceLastActivity: 40,
+                                          hasActiveProcess: false, activeShieldWindowDays: 7),
+                        regenerateHint: "")
+        }
+
+        let first = ScanSnapshot(scope: scope, startedAt: firstDate, items: [
+            artifact("node_modules", 100), artifact(".turbo", 60)
+        ])
+        #expect(try await store.record(first) == nil)
+        var nested = artifact("ignored-child", 900)
+        nested.containingWorktreePath = project
+        let second = ScanSnapshot(scope: scope, startedAt: firstDate.addingTimeInterval(60), items: [
+            artifact("node_modules", 150), artifact(".next", 80), nested, artifact(".next", 80)
+        ])
+        let reopened = ScanHistoryStore(storageDirectory: box.auditRoot)
+        let comparison = try await reopened.record(second)
+        let growing = try #require(comparison?.growingProjects.first)
+        #expect(comparison?.previousScanDate == firstDate)
+        #expect(growing.bytesAdded == 70)
+        #expect(growing.growingArtifacts.map(\.title) == [".next", "node_modules"])
+        #expect(growing.growingArtifacts.map(\.bytesAdded) == [80, 50])
+        #expect(growing.growingArtifacts.map(\.isNew) == [true, false])
+        _ = try await reopened.record(second)
+
+        let historyURL = box.auditRoot.appendingPathComponent("scan-history.json")
+        let saved = try JSONDecoder().decode([ScanSnapshot].self, from: Data(contentsOf: historyURL))
+        #expect(saved.count == 2)
+
+        let changedScope = ScanSnapshot.Scope(configuration: configuration, excludedPaths: [project.path])
+        let rebased = ScanSnapshot(scope: changedScope, startedAt: Date(), items: [])
+        #expect(try await reopened.record(rebased) == nil)
+    }
+
+    @Test("Docker storage reads machine output for a local socket and rejects remote contexts")
+    func readsDockerStorage() throws {
+        let box = try TestSandbox()
+        defer { box.cleanup() }
+        let executable = box.sandboxRoot.appendingPathComponent("docker-fixture")
+        func installFixture(endpoint: String) throws {
+            let script = """
+            #!/bin/sh
+            case "$*" in
+              "context show") printf '%s\\n' desktop-linux ;;
+              "context inspect --format {{.Endpoints.docker.Host}} -- desktop-linux") printf '%s\\n' '\(endpoint)' ;;
+              "--host unix:///tmp/docker.sock system df --format {{json .}}")
+                printf '%s\\n' '{"Type":"Images","TotalCount":"3","Active":"1","Size":"2GB","Reclaimable":"1GB (50%)"}'
+                printf '%s\\n' '{"Type":"Local Volumes","TotalCount":"1","Active":"1","Size":"8MB","Reclaimable":"0B (0%)"}'
+                printf '%s\\n' '{"Type":"Build Cache","TotalCount":"4","Active":"0","Size":"96MB","Reclaimable":"96MB"}'
+                ;;
+              *) exit 2 ;;
+            esac
+            """
+            try script.write(to: executable, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        }
+
+        try installFixture(endpoint: "unix:///tmp/docker.sock")
+        let snapshot = try DockerStorageService.read(using: executable.path)
+        #expect(snapshot.context == "desktop-linux")
+        #expect(snapshot.rows.map(\.type) == ["Images", "Local Volumes", "Build Cache"])
+        #expect(snapshot.rows.first?.reclaimable == "1GB (50%)")
+        #expect(throws: (any Error).self) { try DockerStorageService.parse("not Docker JSON") }
+
+        try installFixture(endpoint: "tcp://example.invalid:2376")
+        do {
+            _ = try DockerStorageService.read(using: executable.path)
+            Issue.record("Expected a remote Docker context to be rejected")
+        } catch {
+            #expect(error.localizedDescription.contains("is remote"))
+        }
     }
 
     // MARK: - Helpers

@@ -99,7 +99,8 @@ public struct APFSBlockScanner: Sendable {
         await withTaskGroup(of: CleanupItem?.self) { group in
             for candidate in projectCandidates {
                 group.addTask {
-                    guard !Task.isCancelled else { return nil }
+                    guard !Task.isCancelled,
+                          SafetyInspector.projectArtifactTreeError(for: candidate.artifactURL) == nil else { return nil }
                     let metrics = Self.measureDirectory(at: candidate.artifactURL)
                     guard metrics.allocatedBytes > 0 else { return nil }
 
@@ -279,46 +280,64 @@ public struct APFSBlockScanner: Sendable {
                 }
             }
             for await batch in group {
-                for item in batch {
-                    worktreeItems.append(item)
-                    totalBytes += item.allocatedSizeBytes
-                    onProgress?(
-                        ScanProgressUpdate(
-                            currentPath: item.displayPath,
-                            discoveredCount: results.count + worktreeItems.count,
-                            totalAllocatedBytes: totalBytes
-                        )
-                    )
-                }
+                worktreeItems.append(contentsOf: batch)
             }
         }
-
-        // Avoid double-counting project artifacts that reside inside a discovered linked worktree
-        let worktreePaths = worktreeItems
-            .filter { $0.worktree?.isPrunable != true }
-            .map { $0.path.standardizedFileURL.path }
-
-        if !worktreePaths.isEmpty {
-            results.removeAll { item in
-                guard item.worktree == nil, item.category == .projectArtifacts else { return false }
-                let itemPath = item.path.standardizedFileURL.path
-                return worktreePaths.contains { wtPath in
-                    itemPath == wtPath || itemPath.hasPrefix(wtPath + "/")
-                }
-            }
-        }
-        results.append(contentsOf: worktreeItems)
 
         // Deduplicate by item.id and sort descending by physical allocated bytes
-        var seen = Set<String>()
-        var unique: [CleanupItem] = []
-        for item in results.sorted(by: { $0.allocatedSizeBytes > $1.allocatedSizeBytes }) {
-            if !seen.contains(item.id) {
-                seen.insert(item.id)
-                unique.append(item)
-            }
+        let unique = Self.uniqueBySize(results)
+        var worktrees = Self.uniqueBySize(worktreeItems)
+        let grouped = Self.groupWorktreeArtifacts(unique, in: &worktrees, inspector: inspector,
+                                                   workspaceRoots: configuration.workspaceRoots)
+            .sorted { $0.allocatedSizeBytes > $1.allocatedSizeBytes }
+        if let latest = worktrees.last, !Task.isCancelled {
+            onProgress?(ScanProgressUpdate(currentPath: latest.displayPath, discoveredCount: grouped.count,
+                                          totalAllocatedBytes: grouped.reduce(0) { $0 + $1.allocatedSizeBytes }))
         }
-        return unique
+        return grouped
+    }
+
+    private static func uniqueBySize(_ items: [CleanupItem]) -> [CleanupItem] {
+        var seen = Set<String>()
+        return items.sorted { $0.allocatedSizeBytes > $1.allocatedSizeBytes }
+            .filter { seen.insert($0.id).inserted }
+    }
+
+    private static func groupWorktreeArtifacts(
+        _ items: [CleanupItem], in worktrees: inout [CleanupItem],
+        inspector: SafetyInspector, workspaceRoots: [URL]
+    ) -> [CleanupItem] {
+        var worktreeIndices: [String: Int] = [:]
+        for index in worktrees.indices where worktrees[index].worktree?.isPrunable == false {
+            worktreeIndices[SafetyInspector.platformPath(worktrees[index].path)] = index
+        }
+        guard !worktreeIndices.isEmpty else { return items + worktrees }
+
+        var topLevel: [CleanupItem] = []
+        for var item in items {
+            guard !Task.isCancelled else { break }
+            guard item.category == .projectArtifacts else {
+                topLevel.append(item)
+                continue
+            }
+            var ancestor = SafetyInspector.platformPath(item.path)
+            while ancestor != "/", worktreeIndices[ancestor] == nil {
+                ancestor = (ancestor as NSString).deletingLastPathComponent
+            }
+            guard let index = worktreeIndices[ancestor] else {
+                topLevel.append(item)
+                continue
+            }
+            let worktree = worktrees[index].path
+            // The parent already includes these bytes. Expose eligible folders only under the worktree.
+            guard !item.actionKind.isToolCommand, item.baseSafetyTier == .safeRebuildable,
+                  (try? inspector.validateDeletionTarget(item.path, allowedWorkspaceRoots: workspaceRoots).get()) != nil,
+                  GitWorktreeInspector.canCleanArtifact(item.path, in: worktree) else { continue }
+            item.containingWorktreePath = worktree
+            if worktrees[index].worktreeArtifacts == nil { worktrees[index].worktreeArtifacts = [] }
+            worktrees[index].worktreeArtifacts?.append(item)
+        }
+        return topLevel + worktrees
     }
 
     // MARK: - Candidate Discovery

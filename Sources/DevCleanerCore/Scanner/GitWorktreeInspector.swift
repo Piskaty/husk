@@ -195,6 +195,23 @@ public enum GitWorktreeInspector {
         return checkCommitMergedIntoMain(sha: sha, inMainRepo: mainRepo)
     }
 
+    static func canCleanArtifact(_ artifact: URL, in worktree: URL) -> Bool {
+        let root = SafetyInspector.platformPath(worktree)
+        let path = SafetyInspector.platformPath(artifact)
+        let gitFile = worktree.appendingPathComponent(".git")
+        var isDirectory: ObjCBool = false
+        guard path.hasPrefix(root + "/"), SafetyInspector.pathComponentError(for: artifact) == nil,
+              SafetyInspector.pathComponentError(for: gitFile) == nil,
+              FileManager.default.fileExists(atPath: gitFile.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { return false }
+        let relative = String(path.dropFirst(root.count + 1))
+        guard let tracked = runGit(in: worktree, arguments: ["--literal-pathspecs", "ls-files", "-z", "--", relative]),
+              tracked.isEmpty else { return false }
+        // A project nested inside a worktree can also have its own Git index.
+        let parent = artifact.deletingLastPathComponent()
+        return runGit(in: parent, arguments: ["--literal-pathspecs", "ls-files", "-z", "--", artifact.lastPathComponent]) == ""
+    }
+
     // MARK: - Helpers
 
     private static func parsePorcelain(_ output: String) -> [RawWorktreeEntry] {

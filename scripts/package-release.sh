@@ -5,7 +5,7 @@ SCRIPT_DIR="${0:A:h}"
 PROJECT_ROOT="${SCRIPT_DIR:h}"
 cd "$PROJECT_ROOT"
 
-VERSION="${HUSK_VERSION:-1.0.5}"
+VERSION="${HUSK_VERSION:-1.0.6}"
 GITHUB_REPO="${HUSK_GITHUB_REPO:-Piskaty/husk}"
 BUILD_MODE="${1:---release}"
 husk_signing_key="${HUSK_UPDATE_SIGNING_KEY:-}"

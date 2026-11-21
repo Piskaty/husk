@@ -9,6 +9,7 @@ public struct ArtifactRowCard: View {
     public let onRevealInFinder: () -> Void
     public let onOpenInTerminal: () -> Void
     public let onCopyRebuildCommand: () -> Void
+    public let worktreeDetails: (label: String, isExpanded: Bool, toggle: () -> Void)?
 
     @ViewState private var isHovered: Bool = false
 
@@ -19,7 +20,8 @@ public struct ArtifactRowCard: View {
         onToggle: @escaping () -> Void,
         onRevealInFinder: @escaping () -> Void,
         onOpenInTerminal: @escaping () -> Void,
-        onCopyRebuildCommand: @escaping () -> Void
+        onCopyRebuildCommand: @escaping () -> Void,
+        worktreeDetails: (label: String, isExpanded: Bool, toggle: () -> Void)? = nil
     ) {
         self.item = item
         self.isSelected = isSelected
@@ -28,6 +30,7 @@ public struct ArtifactRowCard: View {
         self.onRevealInFinder = onRevealInFinder
         self.onOpenInTerminal = onOpenInTerminal
         self.onCopyRebuildCommand = onCopyRebuildCommand
+        self.worktreeDetails = worktreeDetails
     }
 
     public var body: some View {
@@ -83,6 +86,15 @@ public struct ArtifactRowCard: View {
             }
 
             Spacer(minLength: 12)
+
+            if let worktreeDetails {
+                Button(action: worktreeDetails.toggle) {
+                    Label(worktreeDetails.label, systemImage: worktreeDetails.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .accessibilityValue(worktreeDetails.isExpanded ? "Expanded" : "Collapsed")
+            }
 
             // Hover-only utility buttons
             if isHovered {

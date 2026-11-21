@@ -30,6 +30,7 @@ public struct CleanupExecutor: Sendable {
         let fm = FileManager.default
         var records: [CleanedItemRecord] = []
         var totalReclaimed: Int64 = 0
+        let selectedWorktrees = Set(items.filter { $0.worktree?.isPrunable == false }.map(\.path))
 
         for item in items {
             func record(size: Int64, trashedPath: String? = nil, error: Error? = nil) -> CleanedItemRecord {
@@ -49,7 +50,10 @@ public struct CleanupExecutor: Sendable {
             }
 
             do {
-                try validateCurrentTarget(item, allowedWorkspaceRoots: allowedWorkspaceRoots, checkWorktree: dryRun)
+                if let worktree = item.containingWorktreePath, selectedWorktrees.contains(worktree) {
+                    throw Failure.overlappingWorktreeSelection
+                }
+                try validateCurrentTarget(item, allowedWorkspaceRoots: allowedWorkspaceRoots, checkContents: dryRun)
                 if dryRun {
                     records.append(record(size: item.allocatedSizeBytes))
                     totalReclaimed += item.allocatedSizeBytes
@@ -100,7 +104,7 @@ public struct CleanupExecutor: Sendable {
         return session
     }
 
-    private func validateCurrentTarget(_ item: CleanupItem, allowedWorkspaceRoots: [URL], checkWorktree: Bool = true) throws {
+    private func validateCurrentTarget(_ item: CleanupItem, allowedWorkspaceRoots: [URL], checkContents: Bool = true) throws {
         try safetyInspector.validateDeletionItem(item, allowedWorkspaceRoots: allowedWorkspaceRoots).get()
         let currentIdentity = CleanupTargetIdentity.read(at: item.path)
 
@@ -116,7 +120,24 @@ public struct CleanupExecutor: Sendable {
             throw SafetyValidationError.targetChanged(item.path.path)
         }
 
-        if checkWorktree, let worktree = item.worktree {
+        guard checkContents else { return }
+
+        if item.category == .projectArtifacts && !item.actionKind.isToolCommand {
+            if let worktree = item.containingWorktreePath {
+                guard SafetyInspector.matchingProjectRule(forFolderNamed: item.path.lastPathComponent,
+                    inParent: item.path.deletingLastPathComponent())?.id == item.ruleId,
+                    GitWorktreeInspector.canCleanArtifact(item.path, in: worktree) else {
+                    throw Failure.unsafeWorktreeArtifact
+                }
+            }
+            if let error = SafetyInspector.projectArtifactTreeError(for: item.path) { throw error }
+            try safetyInspector.validateDeletionItem(item, allowedWorkspaceRoots: allowedWorkspaceRoots).get()
+            guard CleanupTargetIdentity.read(at: item.path) == currentIdentity else {
+                throw SafetyValidationError.targetChanged(item.path.path)
+            }
+        }
+
+        if let worktree = item.worktree {
             let mainRepo = URL(fileURLWithPath: worktree.mainRepoPath, isDirectory: true)
             guard GitWorktreeInspector.canRemove(item.path, from: mainRepo) else {
                 throw Failure.unsafeWorktree
@@ -149,6 +170,8 @@ public struct CleanupExecutor: Sendable {
     private enum Failure: LocalizedError {
         case unconfirmedToolTask
         case unsafeWorktree
+        case unsafeWorktreeArtifact
+        case overlappingWorktreeSelection
 
         var errorDescription: String? {
             switch self {
@@ -156,6 +179,10 @@ public struct CleanupExecutor: Sendable {
                 return "Running irreversible tool tasks requires explicit confirmation."
             case .unsafeWorktree:
                 return "The worktree must be merged, unlocked, and free of modified, untracked, or ignored files."
+            case .unsafeWorktreeArtifact:
+                return "The folder must match a build rule and contain no Git-tracked files. Rescan to review it."
+            case .overlappingWorktreeSelection:
+                return "Select the worktree or its build folders individually."
             }
         }
     }
@@ -167,14 +194,12 @@ public struct CleanupExecutor: Sendable {
 
         for index in updatedSession.items.indices {
             let record = updatedSession.items[index]
-            guard record.canRestore, let trashedPath = record.trashedPath else {
+            guard let trashedURL = record.existingTrashURL else {
                 continue
             }
-            let trashedURL = URL(fileURLWithPath: trashedPath)
             let originalURL = URL(fileURLWithPath: record.originalPath)
 
-            guard fm.fileExists(atPath: trashedURL.path),
-                  !fm.fileExists(atPath: originalURL.path) else {
+            guard !fm.fileExists(atPath: originalURL.path) else {
                 continue
             }
 
@@ -184,6 +209,7 @@ public struct CleanupExecutor: Sendable {
             }
             let parentDir = originalURL.deletingLastPathComponent()
             try fm.createDirectory(at: parentDir, withIntermediateDirectories: true)
+            guard record.existingTrashURL == trashedURL else { continue }
             try fm.moveItem(at: trashedURL, to: originalURL)
             updatedSession.items[index].isRestored = true
         }

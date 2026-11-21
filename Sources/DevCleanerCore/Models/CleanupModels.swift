@@ -308,6 +308,8 @@ public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
     public let rebuildCommand: String?
     public let actionKind: CleanupActionKind
     public let worktree: WorktreeMetadata?
+    public internal(set) var worktreeArtifacts: [CleanupItem]? = nil
+    public internal(set) var containingWorktreePath: URL? = nil
     let targetIdentity: CleanupTargetIdentity?
 
     public init(
@@ -350,7 +352,7 @@ public struct CleanupItem: Identifiable, Codable, Sendable, Equatable {
     }
 
     public var effectiveSafetyTier: SafetyTier {
-        if protection.isShielded {
+        if protection.isShielded || containingWorktreePath != nil {
             return .protectedManual
         }
         return baseSafetyTier
@@ -492,6 +494,7 @@ public struct CleanedItemRecord: Codable, Sendable, Equatable, Identifiable {
     public let errorDescription: String?
     public let rebuildCommand: String?
     let wasToolCommand: Bool?
+    let trashedIdentity: CleanupTargetIdentity?
 
     public init(
         title: String,
@@ -517,12 +520,37 @@ public struct CleanedItemRecord: Codable, Sendable, Equatable, Identifiable {
         self.errorDescription = errorDescription
         self.rebuildCommand = rebuildCommand
         self.wasToolCommand = wasToolCommand
+        self.trashedIdentity = trashedPath.flatMap { CleanupTargetIdentity.read(at: URL(fileURLWithPath: $0)) }
     }
 
-    public var canRestore: Bool {
-        guard !isRestored, errorDescription == nil, let trashedPath else { return false }
-        return FileManager.default.fileExists(atPath: trashedPath)
+    fileprivate var trashStatus: CleanupTrashItemStatus {
+        guard !isRestored, errorDescription == nil,
+              let trashedPath, trashedPath.hasPrefix("/") else { return .unavailable }
+        let url = URL(fileURLWithPath: trashedPath).standardizedFileURL
+        guard SafetyInspector.pathComponentError(for: url) == nil,
+              FileManager.default.fileExists(atPath: url.path) else { return .unavailable }
+        guard let trashedIdentity else { return .unverified }
+        return trashedIdentity.matchesRecordedIdentity(at: url) ? .verified(url) : .unavailable
     }
+
+    public var existingTrashURL: URL? {
+        guard case .verified(let url) = trashStatus else { return nil }
+        return url
+    }
+
+    public var canRestore: Bool { existingTrashURL != nil }
+}
+
+public enum CleanupTrashItemStatus: Equatable, Sendable {
+    case verified(URL)
+    case unverified
+    case unavailable
+}
+
+public struct CleanupTrashSummary: Equatable, Sendable {
+    public let urls: [URL]
+    public let estimatedBytes: Int64
+    public let itemStatuses: [CleanedItemRecord.ID: CleanupTrashItemStatus]
 }
 
 public struct CleanupSessionRecord: Codable, Sendable, Equatable, Identifiable {
@@ -562,6 +590,23 @@ public struct CleanupSessionRecord: Codable, Sendable, Equatable, Identifiable {
 
     public var totalBytesMovedToTrash: Int64 {
         items.lazy.filter { $0.trashedPath != nil }.reduce(0) { $0 + $1.sizeBytes }
+    }
+
+    public var remainingTrash: CleanupTrashSummary {
+        var urls: [URL] = []
+        var seen = Set<URL>()
+        var estimatedBytes: Int64 = 0
+        var itemStatuses: [CleanedItemRecord.ID: CleanupTrashItemStatus] = [:]
+        if !wasDryRun {
+            for item in items where item.trashedPath != nil {
+                let status = item.trashStatus
+                itemStatuses[item.id] = status
+                guard case .verified(let url) = status, seen.insert(url).inserted else { continue }
+                urls.append(url)
+                estimatedBytes += item.sizeBytes
+            }
+        }
+        return CleanupTrashSummary(urls: urls, estimatedBytes: estimatedBytes, itemStatuses: itemStatuses)
     }
 
     public var storageSummary: String {

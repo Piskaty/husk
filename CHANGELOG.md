@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.6 — 2026-11-21
+
+- Expand a linked worktree to review and clean its build folders individually. Husk protects tracked files and skips any build folder that contains a Git checkout.
+- See which projects and folders grew between two scans with the same settings in Since Last Scan.
+- History shows an estimate of what remains in Trash and can reveal verified items in Finder. Older entries without a recorded file identity are marked unverified for manual review.
+- Inspect local Docker storage for images, containers, volumes, and build cache in a read-only view.
+- Settings stays within reach at the bottom of the sidebar while the rest of the sidebar scrolls.
+
 ## 1.0.5 — 2026-11-21
 
 - Browse the full release history in the new Changelog view. What's New shows the changes when you first open a new version.

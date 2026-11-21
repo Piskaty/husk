@@ -3,6 +3,7 @@ import DevCleanerCore
 
 public struct MainWorkspaceView: View {
     @Bindable var viewModel: AppViewModel
+    @ViewState private var expandedWorktreeIDs = Set<String>()
 
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -119,17 +120,15 @@ public struct MainWorkspaceView: View {
                             trailingText: viewModel.shieldedItems.isEmpty ? nil : "\(viewModel.shieldedItems.count)"
                         )
 
+                        sidebarItem(destination: .scanChanges, trailingText: nil)
+                        sidebarItem(destination: .dockerStorage, trailingText: nil)
+
                         sidebarItem(
                             destination: .auditHistory,
                             trailingText: viewModel.auditSessions.isEmpty ? nil : "\(viewModel.auditSessions.count)"
                         )
 
                         sidebarItem(destination: .changelog, trailingText: nil)
-
-                        sidebarItem(
-                            destination: .settings,
-                            trailingText: viewModel.hasAvailableUpdate ? "Update" : nil
-                        )
                     }
 
                     // Workspace Folders Section
@@ -191,6 +190,17 @@ public struct MainWorkspaceView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 16)
+            }
+            .frame(maxHeight: .infinity)
+
+            sidebarItem(
+                destination: .settings,
+                trailingText: viewModel.hasAvailableUpdate ? "Update" : nil
+            )
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .overlay(alignment: .top) {
+                Divider().opacity(0.45)
             }
         }
         .background(Color.primary.opacity(0.015))
@@ -257,6 +267,10 @@ public struct MainWorkspaceView: View {
         VStack(spacing: 0) {
             if viewModel.sidebarDestination == .auditHistory {
                 AuditHistoryView(viewModel: viewModel)
+            } else if viewModel.sidebarDestination == .scanChanges {
+                ScanChangesView(viewModel: viewModel)
+            } else if viewModel.sidebarDestination == .dockerStorage {
+                DockerStorageView()
             } else if viewModel.sidebarDestination == .changelog {
                 ChangelogView(releases: viewModel.changelog)
             } else if viewModel.sidebarDestination == .settings {
@@ -485,55 +499,98 @@ public struct MainWorkspaceView: View {
 
     private var artifactListView: some View {
         let filtered = viewModel.filteredItems
-        let maxBytes = viewModel.maxItemBytes
-
         return ScrollView {
             LazyVStack(spacing: 1) {
                 ForEach(filtered) { item in
-                    ArtifactRowCard(
-                        item: item,
-                        isSelected: viewModel.selectedIDs.contains(item.id),
-                        maxSizeBytes: maxBytes,
-                        onToggle: {
-                            viewModel.toggleSelection(for: item)
-                        },
-                        onRevealInFinder: {
-                            viewModel.revealInFinder(item.path)
-                        },
-                        onOpenInTerminal: {
-                            viewModel.openInTerminal(item.projectRootPath ?? item.path)
-                        },
-                        onCopyRebuildCommand: {
-                            viewModel.copyRebuildCommand(for: item)
-                        }
-                    )
-                    .contextMenu {
-                        Button(viewModel.selectedIDs.contains(item.id) ? "Deselect" : "Select") {
-                            viewModel.toggleSelection(for: item)
-                        }
-                        if item.rebuildCommand != nil || item.actionKind.displayCommandString != nil {
-                            Button("Copy Rebuild Command") {
-                                viewModel.copyRebuildCommand(for: item)
-                            }
-                        }
-                        Button("Reveal in Finder") {
-                            viewModel.revealInFinder(item.path)
-                        }
-                        if item.projectRootPath != nil {
-                            Button("Open in Terminal") {
-                                viewModel.openInTerminal(item.projectRootPath ?? item.path)
-                            }
-                        }
-                        Divider()
-                        Button("Exclude Project from Husk") {
-                            viewModel.ignoreItem(item)
-                        }
+                    if viewModel.sidebarDestination == .worktrees {
+                        worktreeRows(item)
+                    } else {
+                        artifactRow(item)
                     }
                 }
             }
             .padding(.bottom, 12)
         }
         .padding(.horizontal, -10)
+    }
+
+    @ViewBuilder
+    private func worktreeRows(_ item: CleanupItem) -> some View {
+        let artifacts = viewModel.worktreeArtifacts(for: item)
+        let canAddToScan = viewModel.canAddWorktreeToScan(item)
+        let isExpanded = expandedWorktreeIDs.contains(item.id)
+        if !artifacts.isEmpty || canAddToScan {
+            artifactRow(item, worktreeDetails: (artifacts.isEmpty ? "Build folders" : "Build folders (\(artifacts.count))",
+                                               isExpanded, {
+                if isExpanded {
+                    expandedWorktreeIDs.remove(item.id)
+                } else {
+                    expandedWorktreeIDs.insert(item.id)
+                }
+            }))
+            if isExpanded {
+                if canAddToScan && artifacts.isEmpty {
+                    HStack {
+                        Text("Add this worktree to your scan folders to review its build artifacts.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Button("Add Scan Folder") {
+                            viewModel.addWorkspaceRoot(item.path)
+                            viewModel.startScan()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 32)
+                    .padding(.bottom, 8)
+                }
+                ForEach(artifacts) { artifact in
+                    artifactRow(artifact)
+                        .padding(.leading, 24)
+                }
+            }
+        } else {
+            artifactRow(item)
+        }
+    }
+
+    private func artifactRow(
+        _ item: CleanupItem,
+        worktreeDetails: (label: String, isExpanded: Bool, toggle: () -> Void)? = nil
+    ) -> some View {
+        ArtifactRowCard(
+            item: item,
+            isSelected: viewModel.selectedIDs.contains(item.id),
+            maxSizeBytes: viewModel.maxItemBytes,
+            onToggle: { viewModel.toggleSelection(for: item) },
+            onRevealInFinder: { viewModel.revealInFinder(item.path) },
+            onOpenInTerminal: { viewModel.openInTerminal(item.projectRootPath ?? item.path) },
+            onCopyRebuildCommand: { viewModel.copyRebuildCommand(for: item) },
+            worktreeDetails: worktreeDetails
+        )
+        .contextMenu {
+            Button(viewModel.selectedIDs.contains(item.id) ? "Deselect" : "Select") {
+                viewModel.toggleSelection(for: item)
+            }
+            if item.rebuildCommand != nil || item.actionKind.displayCommandString != nil {
+                Button("Copy Rebuild Command") {
+                    viewModel.copyRebuildCommand(for: item)
+                }
+            }
+            Button("Reveal in Finder") {
+                viewModel.revealInFinder(item.path)
+            }
+            if item.projectRootPath != nil {
+                Button("Open in Terminal") {
+                    viewModel.openInTerminal(item.projectRootPath ?? item.path)
+                }
+            }
+            Divider()
+            Button("Exclude Project from Husk") {
+                viewModel.ignoreItem(item)
+            }
+        }
     }
 
     private var scanningPlaceholderView: some View {
